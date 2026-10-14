@@ -1,0 +1,93 @@
+# Simulated time. One year is 96 days in four 24-day seasons, starting in
+# spring. At time scale 1 a day lasts one second.
+
+import "./common.flow"
+
+const YEAR: f64 = 96.0
+const SEASON: f64 = 24.0
+
+let mut sim_day: f64 = 6.0
+let mut time_level: i32 = 5
+const MAX_TIME_LEVEL: i32 = 12
+
+function time_scale() -> f64 {
+    if time_level == 0 { return 0.25 }
+    if time_level == 1 { return 0.5 }
+    if time_level == 2 { return 1.0 }
+    if time_level == 3 { return 2.0 }
+    if time_level == 4 { return 4.0 }
+    if time_level == 5 { return 8.0 }
+    if time_level == 6 { return 16.0 }
+    if time_level == 7 { return 32.0 }
+    if time_level == 8 { return 64.0 }
+    if time_level == 9 { return 128.0 }
+    if time_level == 10 { return 256.0 }
+    if time_level == 11 { return 512.0 }
+    return 1024.0
+}
+
+function time_scale_name() -> string {
+    if time_level == 0 { return "X0.25" }
+    if time_level == 1 { return "X0.5" }
+    if time_level == 2 { return "X1" }
+    if time_level == 3 { return "X2" }
+    if time_level == 4 { return "X4" }
+    if time_level == 5 { return "X8" }
+    if time_level == 6 { return "X16" }
+    if time_level == 7 { return "X32" }
+    if time_level == 8 { return "X64" }
+    if time_level == 9 { return "X128" }
+    if time_level == 10 { return "X256" }
+    if time_level == 11 { return "X512" }
+    return "X1024"
+}
+
+# Day of the year in [0, YEAR).
+function doy() -> f64 {
+    let y: f64 = floor(sim_day / YEAR)
+    return sim_day - y * YEAR
+}
+
+function year_num() -> i32 {
+    return (sim_day / YEAR) as i32 + 1
+}
+
+function season_name() -> string {
+    let d: f64 = doy()
+    if d < SEASON { return "SPRING" }
+    if d < 2.0 * SEASON { return "SUMMER" }
+    if d < 3.0 * SEASON { return "AUTUMN" }
+    return "WINTER"
+}
+
+function ramp(x: f64, a: f64, b: f64) -> f64 {
+    if x <= a { return 0.0 }
+    if x >= b { return 1.0 }
+    return (x - a) / (b - a)
+}
+
+# How far into the turn of the leaves we are: 0 in summer, 1 at the end of
+# autumn.
+function autumn_amount() -> f64 {
+    return ramp(doy(), 50.0, 70.0)
+}
+
+# Fraction of deciduous leaves on the tree.
+function leaf_amount() -> f64 {
+    let d: f64 = doy()
+    if d < 14.0 { return ramp(d, 2.0, 14.0) }
+    return 1.0 - ramp(d, 64.0, 76.0)
+}
+
+# Snow cover, peaking in midwinter and melting by early spring.
+function snow_amount() -> f64 {
+    let d: f64 = doy()
+    if d < 6.0 { return 1.0 - ramp(d, 0.0, 6.0) }
+    return ramp(d, 74.0, 82.0)
+}
+
+# Whether day-of-year d lies in the window [a, b), wrapping over new year.
+function in_window(d: f64, a: f64, b: f64) -> bool {
+    if a <= b { return d >= a and d < b }
+    return d >= a or d < b
+}

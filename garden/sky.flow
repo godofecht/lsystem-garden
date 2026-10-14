@@ -1,0 +1,143 @@
+# Time of day and weather.
+#
+# DAY AND NIGHT
+#   The days are long in summer and short in winter: the sun's path rises
+#   and falls with the season, so it is up from about 05:00 to 19:00 at
+#   midsummer and 08:00 to 16:00 at midwinter.
+#   The hour runs on its own clock, one full day per `day_len` seconds of
+#   real time (zero holds the hour still), so a day stays watchable at any
+#   time scale. The sun climbs in the east and sets in the west; the moon
+#   stands opposite it. Light is one tint over the whole frame: white at
+#   noon, amber at dawn and dusk, deep blue at night. Nothing is lit at
+#   night but by the moon.
+#
+# WEATHER
+#   Rain is a level from 0 (dry) to 1 (storm). In automatic weather a new
+#   level is drawn every few simulated days, with wet springs and autumns
+#   and dry summers; the rain eases toward it over a few seconds. Cloud
+#   follows the rain. Wetness is the ground's memory of rain over about a
+#   week: plants read it, so a wet spell helps seeds take and plants grow,
+#   and a drought slows them.
+
+import "./common.flow"
+import "./calendar.flow"
+
+let mut tod: f64 = 0.30
+let mut day_len: f64 = 150.0
+let mut rain_auto: bool = true
+let mut rain_target: f64 = 0.0
+let mut rain: f64 = 0.0
+let mut cloud: f64 = 0.1
+let mut wetness: f64 = 0.45
+let mut weather_timer: f64 = 0.0
+
+# Derived each step.
+let mut sun_dx: f64 = 0.0
+let mut sun_dy: f64 = 1.0
+let mut sun_dz: f64 = 0.0
+let mut day_light: f64 = 1.0
+let mut dusk: f64 = 0.0
+let mut tint_r: f64 = 1.0
+let mut tint_g: f64 = 1.0
+let mut tint_b: f64 = 1.0
+let mut flash: f64 = 0.0
+# False lights everything evenly: no night tint on the map, no dark side to
+# the planet. The sun, the hour and the seasons run on regardless.
+let mut sun_light: bool = true
+
+function clamp01(v: f64) -> f64 {
+    if v < 0.0 { return 0.0 }
+    if v > 1.0 { return 1.0 }
+    return v
+}
+
+function smooth01(a: f64, b: f64, x: f64) -> f64 {
+    let t: f64 = clamp01((x - a) / (b - a))
+    return t * t * (3.0 - 2.0 * t)
+}
+
+# A new weather level, wetter in spring and autumn.
+function next_weather() -> void {
+    let d: f64 = doy()
+    let mut wet: f64 = 0.0
+    if d < 24.0 or (d >= 48.0 and d < 72.0) { wet = 0.15 }
+    if d >= 24.0 and d < 48.0 { wet = -0.12 }
+    let r: f64 = rng_unit() - wet
+    rain_target = 0.0
+    if r >= 0.60 and r < 0.82 { rain_target = 0.25 + 0.15 * rng_unit() }
+    if r >= 0.82 and r < 0.95 { rain_target = 0.55 + 0.2 * rng_unit() }
+    if r >= 0.95 { rain_target = 0.9 + 0.1 * rng_unit() }
+    weather_timer = 2.0 + 6.0 * rng_unit()
+}
+
+function sky_step(real_dt: f64, sim_dt: f64) -> void {
+    if day_len > 0.0 {
+        tod = tod + real_dt / day_len
+        tod = tod - floor(tod)
+    }
+    if rain_auto {
+        weather_timer = weather_timer - sim_dt
+        if weather_timer <= 0.0 { next_weather() }
+    }
+    let mut k: f64 = real_dt * 0.5
+    if k > 1.0 { k = 1.0 }
+    rain = rain + (rain_target - rain) * k
+    let ct: f64 = 0.08 + 0.95 * rain
+    cloud = cloud + (ct - cloud) * k
+    let wt: f64 = 0.25 + 0.75 * rain
+    let mut kw: f64 = sim_dt / 7.0
+    if kw > 1.0 { kw = 1.0 }
+    wetness = wetness + (wt - wetness) * kw
+
+    # Sun: rises at 06:00 in the east (+x), sets at 18:00 in the west.
+    # The sun climbs higher and stays up longer in summer.
+    let a: f64 = (tod - 0.25) * 2.0 * PI
+    let decl: f64 = 0.3 * cos(2.0 * PI * (doy() - 36.0) / YEAR)
+    sun_dy = 0.8 * sin(a) + decl
+    sun_dx = cos(a) * 0.85
+    sun_dz = 0.35
+    let n: f64 = sqrt(sun_dx * sun_dx + sun_dy * sun_dy + sun_dz * sun_dz)
+    sun_dx = sun_dx / n
+    sun_dy = sun_dy / n
+    sun_dz = sun_dz / n
+
+    day_light = smooth01(-0.12, 0.16, sun_dy)
+    dusk = exp(0.0 - (sun_dy * 5.0) * (sun_dy * 5.0)) * smooth01(-0.25, 0.0, sun_dy)
+
+    # The light over the whole frame.
+    let nr: f64 = 0.11
+    let ng: f64 = 0.15
+    let nb: f64 = 0.28
+    tint_r = nr + (1.0 - nr) * day_light
+    tint_g = ng + (1.0 - ng) * day_light
+    tint_b = nb + (1.0 - nb) * day_light
+    tint_r = tint_r * (1.0 + 0.10 * dusk)
+    tint_g = tint_g * (1.0 - 0.18 * dusk)
+    tint_b = tint_b * (1.0 - 0.35 * dusk)
+    let over: f64 = 1.0 - 0.38 * cloud * day_light
+    tint_r = tint_r * over
+    tint_g = tint_g * over
+    tint_b = tint_b * over
+
+    # Lightning in a storm.
+    flash = flash * 0.6
+    if rain > 0.85 and rng_unit() < 0.006 { flash = 1.0 }
+}
+
+function hour_text() -> i32 {
+    return (tod * 24.0) as i32
+}
+
+function minute_text() -> i32 {
+    return ((tod * 24.0 - floor(tod * 24.0)) * 60.0) as i32
+}
+
+function weather_name() -> string {
+    if rain < 0.08 {
+        if cloud < 0.3 { return "CLEAR" }
+        return "CLOUDY"
+    }
+    if rain < 0.4 { return "SHOWERS" }
+    if rain < 0.8 { return "RAIN" }
+    return "STORM"
+}

@@ -1,0 +1,61 @@
+# HUD pieces shared by both views: the title band, labelled numbers, the
+# grammar line for the plant in focus, and the key strip.
+
+import "stdlib/gfx.flow"
+import "stdlib/text.flow"
+import "./common.flow"
+import "./species.flow"
+
+const HUD_DIM_R: i32 = 140
+const HUD_DIM_G: i32 = 158
+const HUD_DIM_B: i32 = 134
+
+function hud_title(g: Gfx, view: string, paused: bool) -> void {
+    let w: i32 = gfx_draw_text(g, 8, 8, "L-SYSTEM GARDEN", 2, 232, 242, 226)
+    let v: i32 = gfx_draw_text(g, 8 + w + 14, 14, view, 1, 120, 200, 240)
+    if paused {
+        let tp: i32 = gfx_draw_text_right(g, WIN_W - 8, 8, "PAUSED", 2, 255, 120, 120)
+    }
+}
+
+# "LABEL value" at x; returns the next x.
+function hud_int(g: Gfx, x: i32, y: i32, label: string, n: i32) -> i32 {
+    let mut nx: i32 = x + gfx_draw_text(g, x, y, label, 1, HUD_DIM_R, HUD_DIM_G, HUD_DIM_B) + 6
+    nx = nx + gfx_draw_int(g, nx, y, n, 1, 232, 242, 226) + 14
+    return nx
+}
+
+function hud_word(g: Gfx, x: i32, y: i32, label: string, word: string,
+                  r: i32, gg: i32, b: i32) -> i32 {
+    let mut nx: i32 = x + gfx_draw_text(g, x, y, label, 1, HUD_DIM_R, HUD_DIM_G, HUD_DIM_B) + 6
+    nx = nx + gfx_draw_text(g, nx, y, word, 1, r, gg, b) + 14
+    return nx
+}
+
+function hud_wind_seed(g: Gfx, x0: i32, y: i32, seed_sp: i32) -> i32 {
+    let mut x: i32 = hud_word(g, x0, y, "WIND", wind_name(wind_level), 120, 200, 240)
+    if seed_sp < 0 {
+        x = hud_word(g, x, y, "SEED", "ANY", 180, 250, 160)
+    } else {
+        x = hud_word(g, x, y, "SEED", species_name(seed_sp), 180, 250, 160)
+    }
+    return x
+}
+
+# Name, axiom, productions, angle and generations of one species.
+function hud_grammar(g: Gfx, y: i32, sp: i32) -> void {
+    let mut fx: i32 = 8
+    fx = fx + gfx_draw_text(g, fx, y, species_name(sp), 1, 180, 250, 160) + 10
+    fx = fx + gfx_draw_text(g, fx, y, "AXIOM", 1, HUD_DIM_R, HUD_DIM_G, HUD_DIM_B) + 6
+    fx = fx + gfx_draw_text(g, fx, y, species_axiom(sp), 1, 200, 214, 196) + 10
+    fx = fx + gfx_draw_text(g, fx, y, species_rules(sp), 1, 200, 214, 196) + 10
+    fx = fx + gfx_draw_fixed(g, fx, y, sp_angle[sp], 1, 1, 232, 242, 226) + 4
+    fx = fx + gfx_draw_text(g, fx, y, "DEG", 1, HUD_DIM_R, HUD_DIM_G, HUD_DIM_B) + 8
+    fx = fx + gfx_draw_int(g, fx, y, sp_gens[sp], 1, 232, 242, 226) + 4
+    fx = fx + gfx_draw_text(g, fx, y, "GEN", 1, HUD_DIM_R, HUD_DIM_G, HUD_DIM_B)
+}
+
+function hud_footer(g: Gfx, line1: string, line2: string) -> void {
+    let f1: i32 = gfx_draw_text(g, 8, FOOT_Y + 8, line1, 1, 116, 132, 112)
+    let f2: i32 = gfx_draw_text(g, 8, FOOT_Y + 20, line2, 1, 104, 118, 100)
+}

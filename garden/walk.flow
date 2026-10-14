@@ -1,0 +1,478 @@
+# Walking the map: a first-person camera, collision with trunks and deep
+# water, the plant under the crosshair, planting by click, and the HUD.
+#
+#   W A S D walk    arrows look    drag the mouse to look    M or Shift run
+#   click the ground to plant the chosen seed there
+
+import "stdlib/gfx.flow"
+import "stdlib/text.flow"
+import "stdlib/render3d.flow"
+import "./common.flow"
+import "./species.flow"
+import "./calendar.flow"
+import "./terrain.flow"
+import "./models.flow"
+import "./life.flow"
+import "./view.flow"
+import "./hud.flow"
+import "./sky.flow"
+import "./control.flow"
+
+const EYE: f64 = 1.65
+const WALK: f64 = 4.0
+const LOOK: f64 = 0.032
+const DRAG_LOOK: f64 = 0.0045
+const PITCH_MAX: f64 = 1.35
+const BODY_R: f64 = 0.3
+
+let mut wx: f64 = 0.0
+let mut wz: f64 = 0.0
+let mut w_yaw: f64 = 0.0
+let mut w_pitch: f64 = -0.04
+let mut w_bob: f64 = 0.0
+let mut w_focus: i32 = -1
+# Eye height: walking, among the treetops, or high above the map.
+let mut w_lift: i32 = 0
+
+function lift_height() -> f64 {
+    if w_lift == 1 { return 14.0 }
+    if w_lift == 2 { return 70.0 }
+    return EYE
+}
+
+# Mouse drag state: a press that moves is a look, a press that does not is a
+# click.
+let mut drag_on: bool = false
+let mut drag_moved: bool = false
+let mut drag_x: i32 = 0
+let mut drag_y: i32 = 0
+let mut drag_x0: i32 = 0
+let mut drag_y0: i32 = 0
+
+# A start on open ground: dry, gentle, and with no tree close by.
+function walk_reset() -> void {
+    find_start()
+    wx = start_x
+    wz = start_z
+    let mut r: f64 = 0.0
+    let mut found: bool = false
+    while r < 160.0 and !found {
+        for k in 0 to 16 {
+            if !found {
+                let a: f64 = 2.0 * PI * (k as f64) / 16.0
+                let x: f64 = start_x + cos(a) * r
+                let z: f64 = start_z + sin(a) * r
+                let h: f64 = ground_h(x, z)
+                if h > 1.0 and h < 14.0 and slope(x, z) < 0.25 and clear_of_trees(x, z, 2.5) {
+                    wx = x
+                    wz = z
+                    found = true
+                }
+            }
+        }
+        r = r + 3.0
+    }
+    # Face the middle of the map.
+    w_yaw = 0.0
+    if wx * wx + wz * wz > 1.0 {
+        let dx: f64 = 0.0 - wx
+        let dz: f64 = 0.0 - wz
+        let l: f64 = sqrt(dx * dx + dz * dz)
+        # forward = (-sin yaw, -cos yaw)
+        w_yaw = atan2(0.0 - dx / l, 0.0 - dz / l)
+    }
+    w_pitch = -0.04
+    w_focus = -1
+}
+
+function clear_of_trees(x: f64, z: f64, r: f64) -> bool {
+    let cx: i32 = ((x + MAP_HALF) / HCELL) as i32
+    let cz: i32 = ((z + MAP_HALF) / HCELL) as i32
+    for gz in cz - 3 to cz + 4 {
+        for gx in cx - 3 to cx + 4 {
+            if gx >= 0 and gz >= 0 and gx < HG and gz < HG {
+                let mut k: i32 = hash_head[gz * HG + gx]
+                while k >= 0 {
+                    if in_used[k] == 1 and in_stage[k] != ST_SEED and plant_height(k) > 1.0 {
+                        let dx: f64 = x - (in_x[k] as f64)
+                        let dz: f64 = z - (in_z[k] as f64)
+                        # Clear of the crown as well as the trunk.
+                        let rr: f64 = r + (m_r[in_m[k]] as f64) * (in_s[k] as f64)
+                        if dx * dx + dz * dz < rr * rr { return false }
+                    }
+                    k = in_next[k]
+                }
+            }
+        }
+    }
+    return true
+}
+
+function blocks_trunk(k: i32) -> bool {
+    let sp: i32 = in_sp[k]
+    return (is_tree(sp) or sp == 5) and in_stage[k] >= ST_GROW and plant_height(k) > 1.8
+}
+
+# Whether the body can stand at (x, z).
+function walk_free(x: f64, z: f64) -> bool {
+    let bound: f64 = MAP_HALF - 10.0
+    if x < 0.0 - bound or x > bound or z < 0.0 - bound or z > bound { return false }
+    if ground_h(x, z) < -0.6 { return false }
+    let cx: i32 = ((x + MAP_HALF) / HCELL) as i32
+    let cz: i32 = ((z + MAP_HALF) / HCELL) as i32
+    for gz in cz - 1 to cz + 2 {
+        for gx in cx - 1 to cx + 2 {
+            if gx >= 0 and gz >= 0 and gx < HG and gz < HG {
+                let mut k: i32 = hash_head[gz * HG + gx]
+                while k >= 0 {
+                    if in_used[k] == 1 and blocks_trunk(k) {
+                        let dx: f64 = x - (in_x[k] as f64)
+                        let dz: f64 = z - (in_z[k] as f64)
+                        let r: f64 = BODY_R + 0.03 * plant_height(k)
+                        if dx * dx + dz * dz < r * r { return false }
+                    }
+                    k = in_next[k]
+                }
+            }
+        }
+    }
+    return true
+}
+
+# Keys, mouse look and movement for one frame.
+function walk_update(g: Gfx, seed_sp: i32) -> void {
+    if gfx_key_down(g, KEY_LEFT) { w_yaw = w_yaw + LOOK }
+    if gfx_key_down(g, KEY_RIGHT) { w_yaw = w_yaw - LOOK }
+    if gfx_key_down(g, KEY_UP) { w_pitch = w_pitch + LOOK }
+    if gfx_key_down(g, KEY_DOWN) { w_pitch = w_pitch - LOOK }
+
+    # A captured mouse (the web page's pointer lock) turns the view by its
+    # movement, and a click plants at the crosshair.
+    if ctl_captured {
+        w_yaw = w_yaw - ctl_look_x * 0.0028
+        w_pitch = w_pitch - ctl_look_y * 0.0028
+        if ctl_plant {
+            let k: i32 = plant_at_pixel(WIN_W / 2, (HUD3_H + FOOT_Y) / 2, seed_sp)
+        }
+    }
+    ctl_look_x = 0.0
+    ctl_look_y = 0.0
+    ctl_plant = false
+    let ms: Mouse = gfx_mouse(g)
+    if ms.left != 0 and ms.inside != 0 and !ctl_captured {
+        if !drag_on {
+            drag_on = true
+            drag_moved = false
+            drag_x0 = ms.x
+            drag_y0 = ms.y
+            drag_x = ms.x
+            drag_y = ms.y
+        } else {
+            let dx: i32 = ms.x - drag_x
+            let dy: i32 = ms.y - drag_y
+            let tx: i32 = ms.x - drag_x0
+            let ty: i32 = ms.y - drag_y0
+            if tx * tx + ty * ty > 25 { drag_moved = true }
+            if drag_moved {
+                w_yaw = w_yaw - (dx as f64) * DRAG_LOOK
+                w_pitch = w_pitch - (dy as f64) * DRAG_LOOK
+            }
+            drag_x = ms.x
+            drag_y = ms.y
+        }
+    } else {
+        if drag_on and !drag_moved and drag_y0 > HUD3_H and drag_y0 < FOOT_Y {
+            let k: i32 = plant_at_pixel(drag_x0, drag_y0, seed_sp)
+        }
+        drag_on = false
+    }
+    if w_pitch > PITCH_MAX { w_pitch = PITCH_MAX }
+    if w_pitch < 0.0 - PITCH_MAX { w_pitch = 0.0 - PITCH_MAX }
+
+    let fx: f64 = 0.0 - sin(w_yaw)
+    let fz: f64 = 0.0 - cos(w_yaw)
+    let rx: f64 = cos(w_yaw)
+    let rz: f64 = 0.0 - sin(w_yaw)
+    let mut mx: f64 = 0.0
+    let mut mz: f64 = 0.0
+    if gfx_key_down(g, KEY_W) {
+        mx = mx + fx
+        mz = mz + fz
+    }
+    if gfx_key_down(g, KEY_S) {
+        mx = mx - fx
+        mz = mz - fz
+    }
+    if gfx_key_down(g, KEY_D) {
+        mx = mx + rx
+        mz = mz + rz
+    }
+    if gfx_key_down(g, KEY_A) {
+        mx = mx - rx
+        mz = mz - rz
+    }
+    let ml: f64 = sqrt(mx * mx + mz * mz)
+    if ml > 0.001 {
+        let mut speed: f64 = WALK
+        if gfx_key_down(g, KEY_M) or gfx_key_down(g, KEY_SHIFT) or ctl_run { speed = WALK * 3.0 }
+        if w_lift == 1 { speed = speed * 2.5 }
+        if w_lift == 2 { speed = speed * 6.0 }
+        let step: f64 = speed / 60.0
+        let nx: f64 = wx + mx / ml * step
+        let nz: f64 = wz + mz / ml * step
+        # One axis at a time, so the walker slides along what blocks them.
+        # Above the trees only the map's edge stops them.
+        if w_lift > 0 {
+            let bound: f64 = MAP_HALF - 10.0
+            if nx > 0.0 - bound and nx < bound { wx = nx }
+            if nz > 0.0 - bound and nz < bound { wz = nz }
+        } else {
+            if walk_free(nx, wz) { wx = nx }
+            if walk_free(wx, nz) { wz = nz }
+        }
+        w_bob = w_bob + step * 2.4
+    }
+}
+
+function eye_y() -> f64 {
+    let mut bob: f64 = 0.035 * sin(w_bob)
+    if w_lift > 0 { bob = 0.0 }
+    return surface_h(wx, wz) + lift_height() + bob
+}
+
+function walk_camera() -> void {
+    walker_x = wx
+    walker_z = wz
+    view_set_camera(wx as f32, eye_y() as f32, wz as f32, w_yaw as f32, w_pitch as f32)
+}
+
+# A ray from the eye through window pixel (px, py).
+let mut ray_x: f64 = 0.0
+let mut ray_y: f64 = 0.0
+let mut ray_z: f64 = 0.0
+
+function pixel_ray(px: i32, py: i32) -> void {
+    let f: V3 = r3d_forward(w_yaw as f32, w_pitch as f32)
+    let r: V3 = r3d_right(w_yaw as f32)
+    let u: V3 = v3_cross(r, f)
+    let t: f64 = 1.0 / (foc as f64)
+    let ndx: f64 = ((px as f64) / (WIN_W as f64) * 2.0 - 1.0) * t * ((RW as f64) / (RH as f64))
+    let ndy: f64 = (1.0 - (py as f64) / (WIN_H as f64) * 2.0) * t
+    ray_x = (f.x as f64) + (r.x as f64) * ndx + (u.x as f64) * ndy
+    ray_y = (f.y as f64) + (r.y as f64) * ndx + (u.y as f64) * ndy
+    ray_z = (f.z as f64) + (r.z as f64) * ndx + (u.z as f64) * ndy
+    let l: f64 = sqrt(ray_x * ray_x + ray_y * ray_y + ray_z * ray_z)
+    ray_x = ray_x / l
+    ray_y = ray_y / l
+    ray_z = ray_z / l
+}
+
+# Plant the seed where the ray through a pixel meets the ground.
+function plant_at_pixel(px: i32, py: i32, seed_sp: i32) -> i32 {
+    pixel_ray(px, py)
+    let ey: f64 = eye_y()
+    let mut t: f64 = 0.0
+    while t < 80.0 {
+        t = t + 0.1
+        let x: f64 = wx + ray_x * t
+        let y: f64 = ey + ray_y * t
+        let z: f64 = wz + ray_z * t
+        if y <= surface_h(x, z) {
+            if ground_h(x, z) < -0.3 { return -1 }
+            let mut sp: i32 = seed_sp
+            if sp < 0 { sp = rng_below(N_SPECIES) }
+            let k: i32 = plant_seed(sp, x, z)
+            if k >= 0 { w_focus = k }
+            return k
+        }
+    }
+    return -1
+}
+
+# The plant under the crosshair: the nearest one whose upright cylinder the
+# view ray passes through.
+function walk_pick() -> i32 {
+    pixel_ray(WIN_W / 2, (HUD3_H + FOOT_Y) / 2)
+    let ey: f64 = eye_y()
+    let hl: f64 = ray_x * ray_x + ray_z * ray_z
+    if hl < 0.000001 { return -1 }
+    let mut best: i32 = -1
+    let mut best_t: f64 = 40.0
+    let cx: i32 = ((wx + MAP_HALF) / HCELL) as i32
+    let cz: i32 = ((wz + MAP_HALF) / HCELL) as i32
+    for gz in cz - 7 to cz + 8 {
+        for gx in cx - 7 to cx + 8 {
+            if gx >= 0 and gz >= 0 and gx < HG and gz < HG {
+                let mut k: i32 = hash_head[gz * HG + gx]
+                while k >= 0 {
+                    if in_used[k] == 1 and in_m[k] >= 0 and in_stage[k] != ST_SEED {
+                        let m: i32 = in_m[k]
+                        let rx: f64 = (in_x[k] as f64) - wx
+                        let rz: f64 = (in_z[k] as f64) - wz
+                        let t: f64 = (rx * ray_x + rz * ray_z) / hl
+                        if t > 0.2 and t < best_t {
+                            let qx: f64 = rx - ray_x * t
+                            let qz: f64 = rz - ray_z * t
+                            let s: f64 = in_s[k] as f64
+                            let mut rr: f64 = (m_r[m] as f64) * s * 0.55
+                            if rr < 0.18 { rr = 0.18 }
+                            let y: f64 = ey + ray_y * t - (in_y[k] as f64)
+                            if qx * qx + qz * qz < rr * rr and y >= 0.0 and y <= (m_h[m] as f64) * s {
+                                best_t = t
+                                best = k
+                            }
+                        }
+                    }
+                    k = in_next[k]
+                }
+            }
+        }
+    }
+    return best
+}
+
+function walk_draw_hud(g: Gfx, seed_sp: i32, paused: bool, show_info: bool) -> void {
+    let pick: i32 = walk_pick()
+    if pick >= 0 { w_focus = pick }
+    if w_focus >= 0 and in_used[w_focus] == 0 { w_focus = -1 }
+
+    # Crosshair.
+    let cx: i32 = WIN_W / 2
+    let cy: i32 = (HUD3_H + FOOT_Y) / 2
+    gfx_fill_rect(g, cx - 6, cy, 4, 1, 250, 250, 240)
+    gfx_fill_rect(g, cx + 3, cy, 4, 1, 250, 250, 240)
+    gfx_fill_rect(g, cx, cy - 6, 1, 4, 250, 250, 240)
+    gfx_fill_rect(g, cx, cy + 3, 1, 4, 250, 250, 240)
+
+    hud_title(g, "3D WORLD", paused)
+    let mut x: i32 = hud_int(g, 8, 28, "SEED", world_seed as i32)
+    x = hud_int(g, x, 28, "YEAR", year_num())
+    x = hud_word(g, x, 28, season_name(), "", 200, 220, 160) - 8
+    let hp: i32 = gfx_draw_int_padded(g, x, 28, hour_text(), 2, 1, 232, 242, 226)
+    let hc: i32 = gfx_draw_text(g, x + hp, 28, ":", 1, 232, 242, 226)
+    let hm: i32 = gfx_draw_int_padded(g, x + hp + hc, 28, minute_text(), 2, 1, 232, 242, 226)
+    x = x + hp + hc + hm + 14
+    x = hud_word(g, x, 28, weather_name(), "", 160, 200, 240) - 8
+    x = hud_word(g, x, 28, "TIME", time_scale_name(), 250, 210, 120)
+    x = hud_int(g, x, 28, "PLANTS", plants_alive())
+    x = x + gfx_draw_text(g, x, 28, biome_name(biome_at(wx, wz)), 1, 160, 200, 240) + 6
+    x = hud_int(g, x, 28, "C", (temperature(wx, wz) * 60.0 - 25.0) as i32)
+    x = hud_int(g, x, 28, "MS", r3d_frame_ms() as i32)
+    x = hud_wind_seed(g, x, 28, seed_sp)
+
+    if w_focus >= 0 {
+        let k: i32 = w_focus
+        let sp: i32 = in_sp[k]
+        let mut fx: i32 = 8
+        fx = fx + gfx_draw_text(g, fx, 42, species_name(sp), 1, 180, 250, 160) + 10
+        fx = fx + gfx_draw_text(g, fx, 42, stage_name(in_stage[k]), 1, 250, 210, 120) + 12
+        fx = hud_fixed(g, fx, 42, "AGE", (in_age[k] as f64) / YEAR, "YR")
+        fx = hud_int(g, fx, 42, "GENERATION", in_gen[k])
+        fx = hud_fixed(g, fx, 42, "ANGLE X", in_ga[k] as f64, "")
+        fx = hud_fixed(g, fx, 42, "LEAF X", in_gl[k] as f64, "")
+        fx = hud_fixed(g, fx, 42, "HEIGHT X", in_gh[k] as f64, "")
+        fx = hud_fixed(g, fx, 42, "LIGHT", in_light[k] as f64, "")
+        gfx_fill_rect(g, fx, 42, 7, 7, col_r(in_flower[k]), col_g(in_flower[k]), col_b(in_flower[k]))
+        hud_grammar(g, 56, sp)
+    } else {
+        let t: i32 = gfx_draw_text(g, 8, 42, "LOOK AT A PLANT TO READ ITS LIFE, GENES AND GRAMMAR", 1,
+                                   HUD_DIM_R, HUD_DIM_G, HUD_DIM_B)
+    }
+    if show_info { draw_info(g) }
+    hud_footer(g,
+        "2 FLAT  WASD WALK  ARROWS OR DRAG LOOK  SHIFT RUN  F RISE  CLICK GROUND TO PLANT  Q E SEED  I SPECIES",
+        "- = TIME  K WEATHER  J DAY  L LIGHT  N MAP SIZE  4 PLANET  G WIND  R NEW WORLD  P PAUSE")
+}
+
+function hud_fixed(g: Gfx, x: i32, y: i32, label: string, v: f64, unit: string) -> i32 {
+    let mut nx: i32 = x + gfx_draw_text(g, x, y, label, 1, HUD_DIM_R, HUD_DIM_G, HUD_DIM_B) + 4
+    nx = nx + gfx_draw_fixed(g, nx, y, v, 2, 1, 232, 242, 226) + 3
+    nx = nx + gfx_draw_text(g, nx, y, unit, 1, HUD_DIM_R, HUD_DIM_G, HUD_DIM_B) + 10
+    return nx
+}
+
+# Per species: how many live, the deepest generation, and mean genes. The
+# means drift as selection works. With a hundred generated species the
+# panel shows the eighteen most numerous.
+function draw_info(g: Gfx) -> void {
+    let live: ptr<i32> = info_live
+    let seeds: ptr<i32> = info_seeds
+    let gmax: ptr<i32> = info_gmax
+    for sp in 0 to N_SPECIES {
+        live[sp] = 0
+        seeds[sp] = 0
+        gmax[sp] = 0
+        info_sa[sp] = 0.0
+        info_sl[sp] = 0.0
+        info_sh[sp] = 0.0
+    }
+    for k in 0 to n_plants {
+        if in_used[k] == 1 {
+            let sp: i32 = in_sp[k]
+            if in_stage[k] == ST_SEED {
+                seeds[sp] = seeds[sp] + 1
+            } else {
+                live[sp] = live[sp] + 1
+                info_sa[sp] = info_sa[sp] + (in_ga[k] as f64)
+                info_sl[sp] = info_sl[sp] + (in_gl[k] as f64)
+                info_sh[sp] = info_sh[sp] + (in_gh[k] as f64)
+                if in_gen[k] > gmax[sp] { gmax[sp] = in_gen[k] }
+            }
+        }
+    }
+    let mut alive: i32 = 0
+    for sp in 0 to N_SPECIES {
+        if live[sp] > 0 { alive = alive + 1 }
+        info_order[sp] = sp
+    }
+    # The most numerous first.
+    for a in 0 to N_SPECIES {
+        let mut best: i32 = a
+        for b in a + 1 to N_SPECIES {
+            if live[info_order[b]] > live[info_order[best]] { best = b }
+        }
+        let t: i32 = info_order[a]
+        info_order[a] = info_order[best]
+        info_order[best] = t
+    }
+    let rows: i32 = 18
+    let x0: i32 = WIN_W - 476
+    let y0: i32 = HUD3_H + 8
+    gfx_fill_rect(g, x0 - 8, y0 - 6, 476, 30 + 12 * (rows + 1), 14, 20, 18)
+    let h0: i32 = hud_int(g, x0, y0, "SPECIES ALIVE", alive)
+    let h1: i32 = hud_int(g, h0 - 8, y0, "OF", N_SPECIES)
+    let h2: i32 = gfx_draw_text(g, x0, y0 + 14, "SPECIES                    LIVE SEEDS  GEN ANGLE  LEAF HEIGHT", 1,
+                                HUD_DIM_R, HUD_DIM_G, HUD_DIM_B)
+    for r in 0 to rows {
+        let sp: i32 = info_order[r]
+        let y: i32 = y0 + 14 + 12 * (r + 1)
+        let n: i32 = gfx_draw_text(g, x0, y, species_name(sp), 1, 180, 250, 160)
+        let a: i32 = gfx_draw_int_right(g, x0 + 192, y, live[sp], 1, 232, 242, 226)
+        let b: i32 = gfx_draw_int_right(g, x0 + 228, y, seeds[sp], 1, 200, 200, 180)
+        let c: i32 = gfx_draw_int_right(g, x0 + 258, y, gmax[sp], 1, 232, 242, 226)
+        if live[sp] > 0 {
+            let lf: f64 = live[sp] as f64
+            let d: i32 = gfx_draw_fixed(g, x0 + 272, y, info_sa[sp] / lf, 2, 1, 232, 242, 226)
+            let e: i32 = gfx_draw_fixed(g, x0 + 314, y, info_sl[sp] / lf, 2, 1, 232, 242, 226)
+            let f: i32 = gfx_draw_fixed(g, x0 + 356, y, info_sh[sp] / lf, 2, 1, 232, 242, 226)
+        }
+    }
+}
+
+let mut info_live: ptr<i32> = null
+let mut info_seeds: ptr<i32> = null
+let mut info_gmax: ptr<i32> = null
+let mut info_order: ptr<i32> = null
+let mut info_sa: ptr<f64> = null
+let mut info_sl: ptr<f64> = null
+let mut info_sh: ptr<f64> = null
+
+function walk_alloc() -> void {
+    info_live = alloc_i32(MAX_SPECIES)
+    info_seeds = alloc_i32(MAX_SPECIES)
+    info_gmax = alloc_i32(MAX_SPECIES)
+    info_order = alloc_i32(MAX_SPECIES)
+    info_sa = alloc_f64(MAX_SPECIES)
+    info_sl = alloc_f64(MAX_SPECIES)
+    info_sh = alloc_f64(MAX_SPECIES)
+}

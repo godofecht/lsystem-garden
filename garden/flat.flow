@@ -1,0 +1,870 @@
+# The flat view: eighteen plants in two beds, drawn by a 2D turtle into a
+# software framebuffer, as in examples/morphogenesis/lsystem_plant.flow.
+#
+#   F draw   + - turn   [ ] push and pop (a closing bracket is a tip)
+#   L leaf   K flower on the stem   A apex, which blooms when reached
+#
+# Each frame the turtle reads a longer prefix of every string, so plants
+# extend in the order their grammar produced.
+#
+# Each plant lives out its species' life: it grows, flowers in its window of
+# the year, withers and dies. Its slot is then sown by a neighbour of the same
+# bed, whose seed carries the neighbour's turn angle and flower colour with a
+# small mutation, or now and then by a newcomer of any species. The label
+# under each plant gives its generation. The wind adds a small bend to
+# the heading before every segment, scaled by species flexibility over the
+# plant's height in segments, so tall and short stems bend alike at the tip.
+
+import "stdlib/gfx.flow"
+import "stdlib/text.flow"
+import "./common.flow"
+import "./species.flow"
+import "./derive.flow"
+import "./hud.flow"
+import "./calendar.flow"
+import "./life.flow"
+
+const BACK_Y: i32 = 506
+const FRONT_Y: i32 = 568
+const N_ROW: i32 = 9
+const N_PLANTS: i32 = 18
+const SLOT_CAP: i32 = 196608
+const STACK_CAP: i32 = 256
+const GROW_FRAMES: f64 = 330.0
+const BACK_SCALE: f64 = 0.74
+
+# Framebuffer and a cached background, both packed RGB8.
+let mut fb: ptr<u8> = null
+let mut bg: ptr<u8> = null
+let mut store: ptr<u8> = null
+
+# Per-plant state.
+let mut p_sp: ptr<i32> = null
+let mut p_len: ptr<i32> = null
+let mut p_segs: ptr<i32> = null
+let mut p_row: ptr<i32> = null
+let mut p_seed: ptr<i32> = null
+let mut p_x: ptr<f64> = null
+let mut p_slot: ptr<f64> = null
+let mut p_y: ptr<f64> = null
+let mut p_seg: ptr<f64> = null
+let mut p_h: ptr<f64> = null
+let mut p_scale: ptr<f64> = null
+let mut p_bloom: ptr<f64> = null
+let mut p_budget: ptr<f64> = null
+let mut p_delay: ptr<i32> = null
+let mut p_flower: ptr<i32> = null
+let mut p_box: ptr<f64> = null
+
+# Turtle stack.
+let mut st_x: ptr<f64> = null
+let mut st_y: ptr<f64> = null
+let mut st_a: ptr<f64> = null
+let mut st_d: ptr<i32> = null
+
+# Bounding box written by a measuring pass.
+let mut m_x0: f64 = 0.0
+let mut m_x1: f64 = 0.0
+let mut m_y0: f64 = 0.0
+let mut m_y1: f64 = 0.0
+
+# How far the current paint is faded toward the night air (back bed).
+let mut fade: f64 = 0.0
+let mut wither: f64 = 0.0
+let mut fl_on: bool = true
+
+# Life: age in days, lifespan, generation, the turn-angle gene, and state
+# (0 living, 1 withering, 2 an empty slot waiting for a seed).
+let mut p_age: ptr<f64> = null
+let mut p_life: ptr<f64> = null
+let mut p_gen: ptr<i32> = null
+let mut p_ga: ptr<f64> = null
+let mut p_state: ptr<i32> = null
+let mut p_st: ptr<f64> = null
+let mut flat_focus: i32 = 9
+
+function plant_str(p: i32) -> ptr<u8> {
+    return store + p * SLOT_CAP
+}
+
+function derive_plant(p: i32) -> void {
+    let src: ptr<u8> = derive_species(p_sp[p])
+    let len: i32 = derived_len
+    let dst: ptr<u8> = plant_str(p)
+    let mut segs: i32 = 0
+    for i in 0 to len {
+        dst[i] = src[i]
+        if src[i] as i32 == CH_F { segs = segs + 1 }
+    }
+    p_len[p] = len
+    p_segs[p] = segs
+}
+
+# ---------------------------------------------------------------- painting
+
+function plot(x: i32, y: i32, r: i32, g: i32, b: i32, a: i32) -> void {
+    if x < 0 or x >= WIN_W or y < HUD_H or y >= FOOT_Y { return }
+    let o: i32 = (y * WIN_W + x) * 3
+    if a >= 255 {
+        fb[o] = r as u8
+        fb[o + 1] = g as u8
+        fb[o + 2] = b as u8
+        return
+    }
+    let ia: i32 = 255 - a
+    fb[o] = (((fb[o] as i32) * ia + r * a) / 255) as u8
+    fb[o + 1] = (((fb[o + 1] as i32) * ia + g * a) / 255) as u8
+    fb[o + 2] = (((fb[o + 2] as i32) * ia + b * a) / 255) as u8
+}
+
+# The back bed is seen through air: its colours drift toward the sky.
+# A withering plant browns before it fades.
+function fr(c: i32) -> i32 {
+    let w: f64 = (c as f64) * (1.0 - wither) + 112.0 * wither
+    return (w * (1.0 - fade) + 30.0 * fade) as i32
+}
+
+function fg(c: i32) -> i32 {
+    let w: f64 = (c as f64) * (1.0 - wither) + 86.0 * wither
+    return (w * (1.0 - fade) + 40.0 * fade) as i32
+}
+
+function fbl(c: i32) -> i32 {
+    let w: f64 = (c as f64) * (1.0 - wither) + 54.0 * wither
+    return (w * (1.0 - fade) + 44.0 * fade) as i32
+}
+
+# An antialiased filled disc.
+function disc(cx: f64, cy: f64, rad: f64, r: i32, g: i32, b: i32) -> void {
+    let rr: i32 = fr(r)
+    let gg: i32 = fg(g)
+    let bb: i32 = fbl(b)
+    if rad < 0.75 {
+        plot(floor(cx) as i32, floor(cy) as i32, rr, gg, bb,
+             (rad * 300.0) as i32)
+        return
+    }
+    let x0: i32 = floor(cx - rad - 1.0) as i32
+    let x1: i32 = floor(cx + rad + 1.0) as i32
+    let y0: i32 = floor(cy - rad - 1.0) as i32
+    let y1: i32 = floor(cy + rad + 1.0) as i32
+    let mut y: i32 = y0
+    while y <= y1 {
+        let dy: f64 = (y as f64) + 0.5 - cy
+        let mut x: i32 = x0
+        while x <= x1 {
+            let dx: f64 = (x as f64) + 0.5 - cx
+            let cov: f64 = rad + 0.5 - sqrt(dx * dx + dy * dy)
+            if cov >= 1.0 {
+                plot(x, y, rr, gg, bb, 255)
+            } else {
+                if cov > 0.0 {
+                    plot(x, y, rr, gg, bb, (cov * 255.0) as i32)
+                }
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+function stroke(x0: f64, y0: f64, x1: f64, y1: f64, rad: f64,
+                r: i32, g: i32, b: i32) -> void {
+    let dx: f64 = x1 - x0
+    let dy: f64 = y1 - y0
+    let len: f64 = sqrt(dx * dx + dy * dy)
+    let mut step: f64 = rad * 0.7
+    if step < 0.6 { step = 0.6 }
+    let n: i32 = (len / step) as i32 + 1
+    for k in 1 to n + 1 {
+        let t: f64 = (k as f64) / (n as f64)
+        disc(x0 + dx * t, y0 + dy * t, rad, r, g, b)
+    }
+}
+
+# A pointed leaf along heading ang, widest in the middle.
+function leaf(x: f64, y: f64, ang: f64, len: f64, r: i32, g: i32, b: i32) -> void {
+    let ca: f64 = cos(ang * DEG)
+    let sa: f64 = sin(ang * DEG)
+    let wmax: f64 = 0.8 + len * 0.17
+    let n: i32 = (len * 1.2) as i32 + 2
+    for k in 0 to n + 1 {
+        let t: f64 = (k as f64) / (n as f64)
+        let w: f64 = wmax * sin(PI * t)
+        disc(x + ca * len * t, y + sa * len * t, w, r, g, b)
+    }
+    # Midrib.
+    if len > 9.0 {
+        stroke(x, y, x + ca * len * 0.85, y + sa * len * 0.85, 0.5,
+               r - 30, g - 30, b - 24)
+    }
+}
+
+function ring(x: f64, y: f64, n: i32, rr: f64, prad: f64, spin: f64,
+              r: i32, g: i32, b: i32) -> void {
+    for k in 0 to n {
+        let a: f64 = spin + 2.0 * PI * (k as f64) / (n as f64)
+        disc(x + cos(a) * rr, y + sin(a) * rr, prad, r, g, b)
+    }
+}
+
+# The flower an apex becomes. s is the plant's draw scale.
+function bloom(style: i32, x: f64, y: f64, ang: f64, s: f64, c: i32, j: f64) -> void {
+    let r: i32 = col_r(c)
+    let g: i32 = col_g(c)
+    let b: i32 = col_b(c)
+    let ca: f64 = cos(ang * DEG)
+    let sa: f64 = sin(ang * DEG)
+    if style == END_DAISY {
+        ring(x, y, 9, 3.6 * s, 1.9 * s, j, r, g, b)
+        disc(x, y, 2.0 * s, 246, 200, 60)
+        return
+    }
+    if style == END_TULIP {
+        let cx: f64 = x + ca * 5.5 * s
+        let cy: f64 = y + sa * 5.5 * s
+        disc(cx, cy, 5.6 * s, r, g, b)
+        disc(cx + ca * 4.2 * s - sa * 3.6 * s, cy + sa * 4.2 * s + ca * 3.6 * s,
+             3.2 * s, r, g, b)
+        disc(cx + ca * 4.2 * s + sa * 3.6 * s, cy + sa * 4.2 * s - ca * 3.6 * s,
+             3.2 * s, r, g, b)
+        disc(cx + ca * 5.0 * s, cy + sa * 5.0 * s, 3.0 * s,
+             r - 40, g - 30, b - 30)
+        return
+    }
+    if style == END_SPIKE {
+        for k in 0 to 9 {
+            let t: f64 = (k as f64) * 2.3 * s
+            let side: f64 = 1.5 * s * (((k % 2) * 2 - 1) as f64)
+            disc(x + ca * t - sa * side, y + sa * t + ca * side,
+                 1.9 * s * (1.0 - (k as f64) * 0.07), r, g, b)
+        }
+        return
+    }
+    if style == END_PUFF {
+        disc(x, y, 5.4 * s, 70, 78, 74)
+        for k in 0 to 16 {
+            let a: f64 = j + 2.0 * PI * (k as f64) / 16.0
+            stroke(x, y, x + cos(a) * 6.0 * s, y + sin(a) * 6.0 * s, 0.4,
+                   200, 204, 196)
+            disc(x + cos(a) * 6.2 * s, y + sin(a) * 6.2 * s, 1.0 * s,
+                 r, g, b)
+        }
+        disc(x, y, 1.4 * s, 150, 140, 110)
+        return
+    }
+    if style == END_SUN {
+        ring(x, y, 16, 9.5 * s, 3.4 * s, j, r, g, b)
+        ring(x, y, 16, 7.6 * s, 2.8 * s, j + 0.2, r - 20, g - 40, b)
+        disc(x, y, 6.6 * s, 92, 58, 30)
+        disc(x - 1.4 * s, y - 1.4 * s, 3.0 * s, 120, 80, 40)
+        return
+    }
+    if style == END_CATTAIL {
+        stroke(x, y, x + ca * 12.0 * s, y + sa * 12.0 * s, 2.4 * s, r, g, b)
+        stroke(x + ca * 12.0 * s, y + sa * 12.0 * s,
+               x + ca * 17.0 * s, y + sa * 17.0 * s, 0.6, 120, 140, 90)
+        return
+    }
+    if style == END_BUD {
+        disc(x + ca * 2.0 * s, y + sa * 2.0 * s, 2.0 * s, r, g, b)
+        return
+    }
+}
+
+# A bell on a flower spike. Lower bells, read first, are larger.
+function bell(x: f64, y: f64, ang: f64, s: f64, c: i32) -> void {
+    let r: i32 = col_r(c)
+    let g: i32 = col_g(c)
+    let b: i32 = col_b(c)
+    let ca: f64 = cos(ang * DEG)
+    let sa: f64 = sin(ang * DEG)
+    let tx: f64 = x + ca * 4.0 * s
+    let ty: f64 = y + sa * 4.0 * s + 2.0 * s
+    stroke(x, y, tx, ty, 3.0 * s, r, g, b)
+    disc(tx, ty + 2.0 * s, 3.8 * s, r, g, b)
+    disc(tx, ty + 3.0 * s, 1.6 * s, r - 70, g - 60, b - 40)
+}
+
+function tip(style: i32, x: f64, y: f64, ang: f64, s: f64, lr: i32, lg: i32,
+             lb: i32, leaf_len: f64, c: i32, j: f64) -> void {
+    if style == TIP_LEAF {
+        leaf(x, y, ang + 18.0 * j, leaf_len * s * (1.0 + 0.25 * j),
+             lr + (14.0 * j) as i32, lg + (18.0 * j) as i32, lb)
+        return
+    }
+    if style == TIP_BERRY {
+        leaf(x, y, ang - 30.0, leaf_len * s, lr, lg, lb)
+        if j > -0.2 and fl_on {
+            disc(x, y, 1.9 * s, col_r(c), col_g(c), col_b(c))
+            disc(x - 0.6 * s, y - 0.6 * s, 0.7 * s, 255, 220, 220)
+        }
+        return
+    }
+    if style == TIP_ROSE {
+        if j > 0.25 and fl_on {
+            ring(x, y, 5, 2.4 * s, 1.9 * s, j, col_r(c), col_g(c), col_b(c))
+            disc(x, y, 1.8 * s, col_r(c) - 40, col_g(c) - 20, col_b(c) - 20)
+        } else {
+            leaf(x, y, ang, leaf_len * s, lr, lg, lb)
+        }
+        return
+    }
+}
+
+# ---------------------------------------------------------------- turtle
+
+# The garden's wind at screen x, as a tip bend in degrees per unit of
+# species flexibility.
+function wind_at(x: f64) -> f64 {
+    return wind_amp() * wind_wave(x)
+}
+
+# Interpret a prefix of plant p's string. mode 0 measures with unit
+# segments and no wind; mode 1 draws. Returns the segments read.
+function turtle(p: i32, budget: i32, mode: i32) -> i32 {
+    let sp: i32 = p_sp[p]
+    let s: ptr<u8> = plant_str(p)
+    let len: i32 = p_len[p]
+    let seed: i32 = p_seed[p]
+    let turn: f64 = sp_angle[sp] * p_ga[p]
+    let co: i32 = sp * 9
+    let tip_style: i32 = sp_tip[sp]
+    let end_style: i32 = sp_end[sp]
+    let flower: i32 = p_flower[p]
+    let ds: f64 = p_bloom[p]
+
+    let mut seg: f64 = 1.0
+    let mut x: f64 = 0.0
+    let mut y: f64 = 0.0
+    let mut bend: f64 = 0.0
+    let mut rad0: f64 = 0.0
+    if mode == 1 {
+        seg = p_seg[p]
+        x = p_x[p]
+        y = p_y[p]
+        bend = wind_at(x) * sp_flex[sp] * seg / p_h[p]
+        rad0 = sp_rad[sp] * p_scale[p]
+    }
+    let mut ang: f64 = -90.0 + sp_tilt[sp]
+    let mut depth: i32 = 0
+    let mut sp_top: i32 = 0
+    let mut drawn: i32 = 0
+    let total: f64 = (len as f64) + 1.0
+
+    let mut i: i32 = 0
+    while i < len {
+        let c: i32 = s[i] as i32
+        # Stop at the first segment past the budget, so symbols after the
+        # last drawn segment (an apex) are still read.
+        if c == CH_F and drawn >= budget { break }
+        let j: f64 = sym_jitter(i + seed)
+        if c == CH_F {
+            ang = ang + bend * (1.0 + 0.25 * (depth as f64))
+            let nx: f64 = x + seg * cos(ang * DEG)
+            let ny: f64 = y + seg * sin(ang * DEG)
+            if mode == 0 {
+                if nx < m_x0 { m_x0 = nx }
+                if nx > m_x1 { m_x1 = nx }
+                if ny < m_y0 { m_y0 = ny }
+                if ny > m_y1 { m_y1 = ny }
+            } else {
+                let mut t: f64 = (depth as f64) / 5.0
+                if t > 1.0 { t = 1.0 }
+                let r: i32 = ((sp_col[co] as f64) * (1.0 - t) + (sp_col[co + 3] as f64) * t) as i32
+                let g: i32 = ((sp_col[co + 1] as f64) * (1.0 - t) + (sp_col[co + 4] as f64) * t) as i32
+                let b: i32 = ((sp_col[co + 2] as f64) * (1.0 - t) + (sp_col[co + 5] as f64) * t) as i32
+                let mut rad: f64 = rad0
+                for d in 0 to depth { rad = rad * 0.72 }
+                # Stems taper slightly toward the end of the string.
+                rad = rad * (1.0 - 0.35 * (i as f64) / total)
+                if rad < 0.45 { rad = 0.45 }
+                stroke(x, y, nx, ny, rad, r, g, b)
+            }
+            x = nx
+            y = ny
+            drawn = drawn + 1
+        }
+        if c == CH_PLUS {
+            ang = ang + turn * (1.0 + 0.35 * j)
+        }
+        if c == CH_MINUS {
+            ang = ang - turn * (1.0 + 0.35 * j)
+        }
+        if c == CH_OPEN {
+            if sp_top < STACK_CAP {
+                st_x[sp_top] = x
+                st_y[sp_top] = y
+                st_a[sp_top] = ang
+                st_d[sp_top] = depth
+                sp_top = sp_top + 1
+            }
+            depth = depth + 1
+        }
+        if c == CH_CLOSE {
+            if mode == 1 and tip_style != TIP_NONE {
+                tip(tip_style, x, y, ang, ds, sp_col[co + 6], sp_col[co + 7],
+                    sp_col[co + 8], sp_leaf[sp], flower, j)
+            }
+            if sp_top > 0 {
+                sp_top = sp_top - 1
+                x = st_x[sp_top]
+                y = st_y[sp_top]
+                ang = st_a[sp_top]
+                depth = st_d[sp_top]
+            }
+        }
+        if mode == 1 {
+            if c == CH_L {
+                let flutter: f64 = 6.0 * sin(wind_time * 3.1 + (i as f64)) * wind_at(x) / 3.0
+                leaf(x, y, ang + flutter, sp_leaf[sp] * ds * (1.0 + 0.2 * j),
+                     sp_col[co + 6] + (10.0 * j) as i32,
+                     sp_col[co + 7] + (14.0 * j) as i32, sp_col[co + 8])
+            }
+            if c == CH_K and fl_on {
+                let along: f64 = 1.0 - 0.55 * (i as f64) / total
+                bell(x, y, ang, ds * along, flower)
+            }
+            if c == CH_A and end_style != END_NONE and fl_on {
+                bloom(end_style, x, y, ang, ds * (1.0 + 0.12 * j), flower, j * PI)
+            }
+        }
+        i = i + 1
+    }
+    return drawn
+}
+
+# ---------------------------------------------------------------- planting
+
+function row_base(row: i32) -> f64 {
+    if row == 1 { return BACK_Y as f64 }
+    return FRONT_Y as f64
+}
+
+# Derive, measure and size plant p of species sp at x in row.
+function plant(p: i32, sp: i32, row: i32, x: f64, delay: i32, ga: f64, gen: i32) -> void {
+    p_sp[p] = sp
+    p_ga[p] = ga
+    p_gen[p] = gen
+    p_age[p] = 0.0
+    p_life[p] = lf_life[sp] * (0.75 + 0.5 * rng_unit())
+    p_state[p] = 0
+    p_st[p] = 0.0
+    p_row[p] = row
+    p_seed[p] = rng_below(100000)
+    p_flower[p] = pick_flower(sp)
+    p_budget[p] = 0.0
+    p_delay[p] = delay
+    derive_plant(p)
+
+    m_x0 = 0.0
+    m_x1 = 0.0
+    m_y0 = 0.0
+    m_y1 = 0.0
+    let n: i32 = turtle(p, 1000000000, 0)
+    let mut h: f64 = -m_y0
+    if h < 1.0 { h = 1.0 }
+    let mut w: f64 = m_x1 - m_x0
+    if w < 1.0 { w = 1.0 }
+
+    let mut rs: f64 = 1.0
+    if row == 1 { rs = BACK_SCALE }
+    let scene_h: f64 = (FRONT_Y - HUD_H) as f64
+    let target_h: f64 = sp_height[sp] * scene_h * rs * (0.86 + 0.24 * rng_unit())
+    let max_w: f64 = (WIN_W as f64) / (N_ROW as f64) * 1.9 * rs
+    let mut seg: f64 = target_h / h
+    if w * seg > max_w { seg = max_w / w }
+
+    p_seg[p] = seg
+    p_h[p] = h * seg
+    p_scale[p] = rs
+    # Flowers and leaves grow with the plant, but more slowly than it.
+    let mut bs: f64 = sqrt(p_h[p] / (170.0 * rs))
+    if bs < 0.85 { bs = 0.85 }
+    if bs > 1.8 { bs = 1.8 }
+    p_bloom[p] = rs * bs
+    # Leaning grammars are recentred so the plant stands over its slot.
+    p_x[p] = x - (m_x0 + m_x1) * 0.5 * seg * 0.8
+    p_y[p] = row_base(row)
+    p_slot[p] = x
+    let bo: i32 = p * 4
+    p_box[bo] = p_x[p] + m_x0 * seg
+    p_box[bo + 1] = p_x[p] + m_x1 * seg
+    p_box[bo + 2] = p_y[p] + m_y0 * seg
+    p_box[bo + 3] = p_y[p]
+}
+
+# A fresh garden: every species at least once, tall ones at the back.
+function new_garden() -> void {
+    let pick: array<i32, 18> = [0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                0, 0, 0, 0, 0, 0, 0, 0, 0]
+    for k in 0 to N_PLANTS {
+        if k < N_FLAT_SPECIES {
+            pick[k] = k
+        } else {
+            pick[k] = rng_below(N_FLAT_SPECIES)
+        }
+    }
+    # Shuffle, then a stable sort by height so the tallest nine go behind.
+    for k in 0 to N_PLANTS {
+        let m: i32 = k + rng_below(N_PLANTS - k)
+        let tmp: i32 = pick[k]
+        pick[k] = pick[m]
+        pick[m] = tmp
+    }
+    for a in 0 to N_PLANTS {
+        for b in 0 to N_PLANTS - 1 - a {
+            if sp_height[pick[b]] < sp_height[pick[b + 1]] {
+                let tmp: i32 = pick[b]
+                pick[b] = pick[b + 1]
+                pick[b + 1] = tmp
+            }
+        }
+    }
+    # Shuffle within each row so heights do not form a staircase.
+    for row in 0 to 2 {
+        let base: i32 = row * N_ROW
+        for k in 0 to N_ROW {
+            let m: i32 = k + rng_below(N_ROW - k)
+            let tmp: i32 = pick[base + k]
+            pick[base + k] = pick[base + m]
+            pick[base + m] = tmp
+        }
+    }
+    let slot: f64 = (WIN_W as f64) / (N_ROW as f64)
+    for k in 0 to N_PLANTS {
+        let mut row: i32 = 0
+        let mut col: i32 = k - N_ROW
+        if k < N_ROW {
+            row = 1
+            col = k
+        }
+        let mut off: f64 = 0.0
+        if row == 0 { off = slot * 0.5 }
+        let x: f64 = slot * (col as f64) + slot * 0.3 + off * 0.5
+                   + slot * 0.2 * rng_unit()
+        plant(k, pick[k], row, x, rng_below(150) + (1 - row) * 40, exp(0.06 * rng_gauss()), 1)
+    }
+}
+
+# ---------------------------------------------------------------- scene
+
+function bg_set(x: i32, y: i32, r: i32, g: i32, b: i32) -> void {
+    let o: i32 = (y * WIN_W + x) * 3
+    bg[o] = r as u8
+    bg[o + 1] = g as u8
+    bg[o + 2] = b as u8
+}
+
+function hash2(x: i32, y: i32) -> f64 {
+    return sym_jitter(x * 7919 + y * 104729)
+}
+
+function build_background() -> void {
+    for y in 0 to WIN_H {
+        for x in 0 to WIN_W {
+            bg_set(x, y, 12, 16, 14)
+        }
+    }
+    for y in HUD_H to FOOT_Y {
+        let t: f64 = ((y - HUD_H) as f64) / ((FOOT_Y - HUD_H) as f64)
+        let sr: i32 = (14.0 + 10.0 * t) as i32
+        let sg: i32 = (19.0 + 16.0 * t) as i32
+        let sb: i32 = (24.0 + 12.0 * t) as i32
+        for x in 0 to WIN_W {
+            let xf: f64 = x as f64
+            let hill_far: f64 = 430.0 + 26.0 * sin(xf * 0.006 + 1.0)
+                              + 14.0 * sin(xf * 0.017)
+            let hill_near: f64 = 474.0 + 18.0 * sin(xf * 0.009 + 4.0)
+                               + 8.0 * sin(xf * 0.031)
+            let yf: f64 = y as f64
+            if yf >= (FRONT_Y as f64) {
+                # Front bed soil with a lit rim.
+                let d: f64 = yf - (FRONT_Y as f64)
+                let n: f64 = hash2(x, y)
+                let mut k: f64 = 1.0 - d * 0.012
+                if n > 0.82 { k = k * 1.35 }
+                if n < -0.86 { k = k * 0.6 }
+                let mut rr: i32 = (44.0 * k) as i32
+                let mut gg: i32 = (34.0 * k) as i32
+                let mut bb: i32 = (24.0 * k) as i32
+                if d < 2.0 {
+                    rr = 70
+                    gg = 92
+                    bb = 52
+                }
+                bg_set(x, y, rr, gg, bb)
+            } else {
+                if yf >= (BACK_Y as f64) and yf < (BACK_Y as f64) + 12.0 {
+                    let n: f64 = hash2(x, y)
+                    let mut k: f64 = 0.8
+                    if n > 0.8 { k = 1.05 }
+                    bg_set(x, y, (36.0 * k) as i32, (32.0 * k) as i32,
+                           (26.0 * k) as i32)
+                } else {
+                    if yf > hill_near {
+                        bg_set(x, y, 20, 32, 26)
+                    } else {
+                        if yf > hill_far {
+                            bg_set(x, y, 18, 26, 26)
+                        } else {
+                            bg_set(x, y, sr, sg, sb)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    # A low moon, then a few stars in the upper sky.
+    for y in HUD_H to HUD_H + 120 {
+        for x in WIN_W - 200 to WIN_W - 80 {
+            let dx: f64 = (x as f64) - ((WIN_W - 140) as f64)
+            let dy: f64 = (y as f64) - ((HUD_H + 60) as f64)
+            let d: f64 = sqrt(dx * dx + dy * dy)
+            if d < 22.0 {
+                bg_set(x, y, 214, 220, 200)
+            } else {
+                if d < 60.0 {
+                    let o: i32 = (y * WIN_W + x) * 3
+                    let k: f64 = (60.0 - d) / 38.0 * 10.0
+                    bg_set(x, y, (bg[o] as i32) + (k as i32), (bg[o + 1] as i32) + (k as i32),
+                           (bg[o + 2] as i32) + (k as i32))
+                }
+            }
+        }
+    }
+    for k in 0 to 90 {
+        let sx: i32 = rng_below(WIN_W)
+        let sy: i32 = HUD_H + 4 + rng_below(220)
+        let v: i32 = 50 + rng_below(70)
+        bg_set(sx, sy, v, v + 4, v + 10)
+    }
+}
+
+function restore_background() -> void {
+    let n: i32 = WIN_W * WIN_H * 3
+    for i in 0 to n {
+        fb[i] = bg[i]
+    }
+}
+
+# ---------------------------------------------------------------- HUD
+
+function draw_hud(g: Gfx, focus: i32, seed_sp: i32, paused: bool) -> void {
+    let mut chars: i32 = 0
+    let mut shown: i32 = 0
+    let mut total: i32 = 0
+    for p in 0 to N_PLANTS {
+        chars = chars + p_len[p]
+        total = total + p_segs[p]
+        let mut b: i32 = p_budget[p] as i32
+        if b > p_segs[p] { b = p_segs[p] }
+        shown = shown + b
+    }
+    hud_title(g, "FLAT", paused)
+    let mut x: i32 = hud_int(g, 8, 28, "PLANTS", N_PLANTS)
+    x = hud_int(g, x, 28, "SPECIES", N_FLAT_SPECIES)
+    x = hud_int(g, x, 28, "YEAR", year_num())
+    x = hud_word(g, x, 28, season_name(), "", 200, 220, 160) - 8
+    x = hud_word(g, x, 28, "TIME", time_scale_name(), 250, 210, 120)
+    x = hud_int(g, x, 28, "DRAWN", shown)
+    x = hud_wind_seed(g, x, 28, seed_sp)
+    if seed_sp >= N_FLAT_SPECIES {
+        let t3: i32 = gfx_draw_text(g, x, 28, "GROWS IN 3D ONLY", 1, 200, 150, 110)
+    }
+    if focus >= 0 {
+        hud_grammar(g, 42, p_sp[focus])
+    }
+    hud_footer(g,
+        "EACH PLANT IS A STRING REWRITTEN IN PARALLEL, THEN READ BY A TURTLE. THE WIND BENDS EVERY SEGMENT.",
+        "3 WORLD  - = TIME  R NEW GARDEN  P PAUSE  G WIND  Q E SEED  CLICK A BED TO PLANT  HOVER TO READ")
+}
+
+# Species names in the soil under the front bed.
+function draw_labels(g: Gfx) -> void {
+    for p in N_ROW to N_PLANTS {
+        if p_state[p] != 2 {
+            let cx: i32 = (p_slot[p]) as i32 - 8
+            let tl: i32 = gfx_draw_text_centered(g, cx, FRONT_Y + 22,
+                                                 species_name(p_sp[p]), 1,
+                                                 150, 128, 100)
+            let gx: i32 = cx + tl / 2 + 5
+            let gl: i32 = gfx_draw_text(g, gx, FRONT_Y + 22, "G", 1, 110, 96, 76)
+            let gn: i32 = gfx_draw_int(g, gx + gl + 1, FRONT_Y + 22, p_gen[p], 1, 110, 96, 76)
+        }
+    }
+}
+
+# The plant under the pointer: front bed first, then back, else nearest.
+function plant_at(mx: i32, my: i32) -> i32 {
+    let xf: f64 = mx as f64
+    let yf: f64 = my as f64
+    let mut best: i32 = -1
+    let mut best_d: f64 = 1.0e9
+    for p in 0 to N_PLANTS {
+        let bo: i32 = p * 4
+        if xf >= p_box[bo] - 4.0 and xf <= p_box[bo + 1] + 4.0
+           and yf >= p_box[bo + 2] - 4.0 and yf <= p_box[bo + 3] + 30.0 {
+            let mut d: f64 = xf - p_x[p]
+            if d < 0.0 { d = -d }
+            if p_row[p] == 1 { d = d + 40.0 }
+            if d < best_d {
+                best_d = d
+                best = p
+            }
+        }
+    }
+    return best
+}
+
+
+function flat_init() -> void {
+    let px_bytes: i64 = (WIN_W as i64) * (WIN_H as i64) * 3
+    fb = malloc(px_bytes) as ptr<u8>
+    bg = malloc(px_bytes) as ptr<u8>
+    store = malloc((SLOT_CAP as i64) * (N_PLANTS as i64)) as ptr<u8>
+
+    p_sp = alloc_i32(N_PLANTS)
+    p_len = alloc_i32(N_PLANTS)
+    p_segs = alloc_i32(N_PLANTS)
+    p_row = alloc_i32(N_PLANTS)
+    p_seed = alloc_i32(N_PLANTS)
+    p_x = alloc_f64(N_PLANTS)
+    p_slot = alloc_f64(N_PLANTS)
+    p_y = alloc_f64(N_PLANTS)
+    p_seg = alloc_f64(N_PLANTS)
+    p_h = alloc_f64(N_PLANTS)
+    p_scale = alloc_f64(N_PLANTS)
+    p_bloom = alloc_f64(N_PLANTS)
+    p_budget = alloc_f64(N_PLANTS)
+    p_delay = alloc_i32(N_PLANTS)
+    p_flower = alloc_i32(N_PLANTS)
+    p_box = alloc_f64(N_PLANTS * 4)
+    p_age = alloc_f64(N_PLANTS)
+    p_life = alloc_f64(N_PLANTS)
+    p_gen = alloc_i32(N_PLANTS)
+    p_ga = alloc_f64(N_PLANTS)
+    p_state = alloc_i32(N_PLANTS)
+    p_st = alloc_f64(N_PLANTS)
+
+    st_x = alloc_f64(STACK_CAP)
+    st_y = alloc_f64(STACK_CAP)
+    st_a = alloc_f64(STACK_CAP)
+    st_d = alloc_i32(STACK_CAP)
+
+    build_background()
+    new_garden()
+}
+
+function flat_new_garden() -> void {
+    new_garden()
+}
+
+# Advance every life by dt days.
+function flat_step(dt: f64) -> void {
+    let d: f64 = doy()
+    for p in 0 to N_PLANTS {
+        if p_delay[p] > 0 {
+            p_delay[p] = p_delay[p] - 1
+        } else {
+            let sp: i32 = p_sp[p]
+            if p_state[p] == 0 {
+                p_age[p] = p_age[p] + dt
+                let mut g: f64 = p_age[p] / lf_grow[sp]
+                if lf_kind[sp] == K_WOODY { g = 0.3 + g }
+                if g > 1.0 { g = 1.0 }
+                p_budget[p] = (p_segs[p] as f64 + 1.0) * g
+                let mut dies: bool = p_age[p] > p_life[p]
+                if lf_kind[sp] == K_ANNUAL and d > 74.0 and p_age[p] > 12.0 { dies = true }
+                if dies {
+                    p_state[p] = 1
+                    p_st[p] = 0.0
+                }
+            } else {
+                p_st[p] = p_st[p] + dt
+                if p_state[p] == 1 and p_st[p] > 10.0 {
+                    p_state[p] = 2
+                    p_st[p] = 0.0
+                }
+                if p_state[p] == 2 and p_st[p] > 3.0 { reseed(p) }
+            }
+        }
+    }
+}
+
+# Sow an empty slot from a living neighbour in the same bed, or a newcomer.
+function reseed(p: i32) -> void {
+    let row: i32 = p_row[p]
+    let mut parent: i32 = -1
+    let mut seen: i32 = 0
+    for q in 0 to N_PLANTS {
+        let mut dq: i32 = q - p
+        if dq < 0 { dq = 0 - dq }
+        if q != p and p_row[q] == row and dq <= 2 and p_state[q] == 0
+           and p_age[q] >= lf_grow[p_sp[q]] {
+            seen = seen + 1
+            if rng_below(seen) == 0 { parent = q }
+        }
+    }
+    let x: f64 = p_slot[p] + 8.0 * rng_gauss()
+    if parent >= 0 and rng_unit() < 0.6 {
+        let ga: f64 = clamp_gene(p_ga[parent] * exp(0.05 * rng_gauss()), 0.55, 1.7)
+        plant(p, p_sp[parent], row, x, 0, ga, p_gen[parent] + 1)
+        p_flower[p] = drift_colour(p_flower[parent])
+    } else {
+        plant(p, rng_below(N_FLAT_SPECIES), row, x, 0, exp(0.06 * rng_gauss()), 1)
+    }
+}
+
+# Pointer input for this frame: hover reads a grammar, a click plants.
+function flat_pointer(mx: i32, my: i32, inside: bool, clicked: bool, seed_sp: i32) -> void {
+    if !inside { return }
+    let hp: i32 = plant_at(mx, my)
+    if hp >= 0 { flat_focus = hp }
+    if !clicked or my <= HUD_H or my >= FOOT_Y { return }
+    # Replace the nearest plant in the clicked bed.
+    let mut row: i32 = 0
+    if my < BACK_Y + 30 { row = 1 }
+    let mut best: i32 = -1
+    let mut best_d: f64 = 1.0e9
+    for p in 0 to N_PLANTS {
+        if p_row[p] == row {
+            let mut d: f64 = (mx as f64) - p_x[p]
+            if d < 0.0 { d = -d }
+            if d < best_d {
+                best_d = d
+                best = p
+            }
+        }
+    }
+    let mut sp: i32 = seed_sp
+    if sp < 0 or sp >= N_FLAT_SPECIES { sp = rng_below(N_FLAT_SPECIES) }
+    if best >= 0 {
+        plant(best, sp, row, mx as f64, 0, 1.0, 1)
+        flat_focus = best
+    }
+}
+
+function flat_draw_plant(p: i32) -> void {
+    if p_state[p] == 2 { return }
+    wither = 0.0
+    if p_state[p] == 1 { wither = p_st[p] / 10.0 }
+    let sp: i32 = p_sp[p]
+    fl_on = p_state[p] == 0 and p_age[p] >= lf_grow[sp] * 0.8 and flowering(sp, doy())
+    if sp_tip[sp] == TIP_BERRY and p_state[p] == 0 { fl_on = in_window(doy(), lf_fl0[sp], 76.0) }
+    if sp_end[sp] == END_CATTAIL { fl_on = p_state[p] == 0 }
+    let shown: i32 = turtle(p, p_budget[p] as i32, 1)
+}
+
+function flat_draw(g: Gfx, seed_sp: i32, paused: bool) -> void {
+    restore_background()
+    fade = 0.30
+    for p in 0 to N_ROW { flat_draw_plant(p) }
+    fade = 0.0
+    for p in N_ROW to N_PLANTS { flat_draw_plant(p) }
+    wither = 0.0
+    fl_on = true
+    gfx_blit_rgb(g, 0, 0, WIN_W, WIN_H, fb)
+    draw_labels(g)
+    draw_hud(g, flat_focus, seed_sp, paused)
+}

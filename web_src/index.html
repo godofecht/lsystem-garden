@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>L-System Garden</title>
+<meta name="description" content="A world of plants grown from text. Walk it in your browser.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IM+Fell+English:ital@0;1&family=Atkinson+Hyperlegible:wght@400;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --prussian: #1C3D6B;
+  --white: #EEF3F2;
+  --faded: #9FB9CF;
+  --line: rgba(238, 243, 242, 0.22);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; overflow: hidden; }
+body {
+  background: radial-gradient(120% 90% at 50% 0%, #24497c 0%, var(--prussian) 55%, #16335d 100%);
+  color: var(--white);
+  font: 15px/1.4 "Atkinson Hyperlegible", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  height: 100dvh;
+  padding: max(16px, env(safe-area-inset-top)) 16px max(14px, env(safe-area-inset-bottom));
+}
+#sunprint { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none; }
+header, main, footer { position: relative; z-index: 1; }
+
+header { text-align: center; padding-bottom: 12px; }
+h1 { font: 400 clamp(26px, 4.2vh, 40px)/1 "IM Fell English", Georgia, serif; margin: 0; letter-spacing: 0.01em; }
+
+main { display: grid; place-items: center; min-height: 0; }
+.print {
+  position: relative; line-height: 0;
+  /* As large as fits: never wider than the window, never taller than the space left. */
+  width: min(100%, calc((100dvh - 178px) * 1.5));
+  aspect-ratio: 3 / 2;
+  box-shadow: 0 0 0 1px var(--line), 0 24px 70px -28px rgba(4, 12, 30, 0.9);
+  border-radius: 2px;
+  background: #102748;
+}
+canvas#canvas { width: 100%; height: 100%; display: block; image-rendering: pixelated; border-radius: 2px; }
+.veil {
+  position: absolute; inset: 0; display: grid; place-items: center; cursor: pointer;
+  background: rgba(16, 39, 72, 0.55); border-radius: 2px; line-height: 1.4;
+  transition: opacity .5s ease;
+}
+.veil.gone { opacity: 0; pointer-events: none; }
+.veil button {
+  font: italic 400 clamp(22px, 3.4vh, 30px)/1 "IM Fell English", serif; color: var(--white);
+  background: none; border: 1px solid var(--line); border-radius: 999px;
+  padding: 14px 30px 15px; cursor: pointer;
+}
+.veil button:hover { border-color: var(--white); }
+.veil .note { position: absolute; bottom: 14px; color: var(--faded); font-size: 13px; padding: 0 12px; text-align: center; }
+
+footer {
+  display: flex; justify-content: center; align-items: flex-end; gap: 14px 26px; flex-wrap: wrap;
+  padding-top: 12px; color: var(--faded); font-size: 13px;
+}
+.hint { position: absolute; left: 0; right: 0; bottom: -22px; text-align: center;
+        color: var(--faded); font-size: 12px; line-height: 1; opacity: 0; transition: opacity .4s; }
+.hint.on { opacity: 1; }
+.dial { display: grid; gap: 4px; width: 112px; }
+.dial span { display: flex; justify-content: space-between; font-size: 12px; }
+.dial b { font-weight: 400; color: var(--white); }
+input[type=range] {
+  -webkit-appearance: none; appearance: none; width: 100%; height: 14px; background: transparent;
+  border: 0; padding: 0; margin: 0; cursor: pointer;
+}
+input[type=range]::-webkit-slider-runnable-track { height: 1px; background: var(--line); }
+input[type=range]::-moz-range-track { height: 1px; background: var(--line); }
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 11px; height: 11px; margin-top: -5px; border-radius: 50%;
+  background: var(--prussian); border: 1px solid var(--white);
+}
+input[type=range]::-moz-range-thumb {
+  width: 9px; height: 9px; border-radius: 50%; background: var(--prussian); border: 1px solid var(--white);
+}
+input[type=range]:disabled { opacity: 0.35; cursor: default; }
+form { display: flex; align-items: center; gap: 8px; }
+form label { color: var(--faded); }
+input {
+  font: inherit; color: var(--white); background: transparent; width: 8.5ch; text-align: center;
+  border: 0; border-bottom: 1px solid var(--line); padding: 3px 2px;
+}
+input::placeholder { color: rgba(159, 185, 207, 0.6); }
+input:focus { outline: none; border-bottom-color: var(--white); }
+.link { background: none; border: 0; padding: 0; font: inherit; color: var(--white); cursor: pointer;
+        text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 4px; }
+.link:hover { text-decoration-color: var(--white); }
+:focus-visible { outline: 1px solid var(--white); outline-offset: 4px; }
+kbd { font: inherit; color: var(--white); }
+@media (max-width: 640px) {
+  .keys { display: none; }
+  .print { width: 100%; }
+  .dial { width: 92px; }
+}
+</style>
+</head>
+<body>
+<canvas id="sunprint" aria-hidden="true"></canvas>
+
+<header><h1>L-System Garden</h1></header>
+
+<main>
+  <div class="print">
+    <canvas id="canvas" width="960" height="640" tabindex="0" aria-label="The garden"></canvas>
+    <div class="veil" id="veil">
+      <button id="start">Enter the garden</button>
+      <span class="note" id="note">Every plant here is grown from a short grammar</span>
+    </div>
+    <div class="hint" id="hint">Click the garden to look with the mouse. Esc lets go.</div>
+  </div>
+</main>
+
+<footer>
+  <form id="seedform">
+    <label for="seed">Seed</label>
+    <input id="seed" inputmode="numeric" autocomplete="off" placeholder="random">
+    <button class="link" type="submit">Grow</button>
+  </form>
+  <label class="dial"><span>World <b id="v-world">map</b></span><input type="range" id="c-world" min="0" max="5" value="1" disabled></label>
+  <label class="dial"><span>Light <b id="v-light">sun</b></span><input type="range" id="c-light" min="0" max="1" value="1" disabled></label>
+  <label class="dial"><span>Rain <b id="v-rain">auto</b></span><input type="range" id="c-rain" min="0" max="100" value="0" disabled></label>
+  <label class="dial"><span>Wind <b id="v-wind">breeze</b></span><input type="range" id="c-wind" min="0" max="34" value="10" disabled></label>
+  <label class="dial"><span>Hour <b id="v-hour">07:12</b></span><input type="range" id="c-hour" min="0" max="1439" value="432" disabled></label>
+  <label class="dial"><span>Day <b id="v-day">150 s</b></span><input type="range" id="c-day" min="0" max="4" value="2" disabled></label>
+  <label class="dial"><span>Speed <b id="v-speed">x8</b></span><input type="range" id="c-speed" min="0" max="12" value="5" disabled></label>
+  <span class="keys"><kbd>WASD</kbd> walk &nbsp; <kbd>Shift</kbd> run &nbsp; <kbd>4</kbd> planet &nbsp; <kbd>L</kbd> light &nbsp; <kbd>I</kbd> species</span>
+</footer>
+
+<script src="lsystem_garden.js"></script>
+<script>
+/* A few of the garden's own grammars, sun-printed along the bottom edge. */
+const PLANTS = [
+  { axiom: "X", angle: 13, gens: 6, rules: { X: ["F[+X]F[-X]+X", "F[-X]F[+X]-X", "F[+X][-X]FX"], F: ["FF"] }, leaf: true },
+  { axiom: "FA", angle: 30, gens: 6, roll: 22.5, rules: { A: ["[&FL!A]/////[&FL!A]///////[&FL!A]"], F: ["S/////F"], S: ["F"] }, leaf: true },
+  { axiom: "[--L][++L]A", angle: 34, gens: 6, rules: { A: ["F[+K]F[-K]A", "F[-K]F[+K]A"] }, leaf: true, bell: true },
+  { axiom: "[---B][--B][-B][B][+B][++B][+++B]", angle: 6, gens: 8, rules: { B: ["FB", "F+B", "F-B", "FB"] } },
+  { axiom: "A", angle: 28, gens: 5, rules: { A: ["F[+L]F[-A]A", "F[-L]F[+A]A", "FF[+L]A"] }, leaf: true, daisy: true },
+  { axiom: "FA", angle: 78, gens: 10, roll: 67, trop: 0.05, rules: { A: ["FF[&B]/[&B]/[&B]/[&B]/[&B]/A"], B: ["F[+L][-L][&L][^L]B", "F[+L][-L]B"] }, leaf: true }
+];
+
+function rng(seed) {
+  return function () {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+function grow(sp, r) {
+  let s = sp.axiom;
+  for (let g = 0; g < sp.gens; g++) {
+    let o = "";
+    for (const c of s) { const v = sp.rules[c]; o += v ? v[Math.floor(r() * v.length)] : c; }
+    s = o;
+  }
+  const D = Math.PI / 180, turn = sp.angle * D, roll = (sp.roll || sp.angle) * D;
+  let H = [0, 1, 0], L = [-1, 0, 0], U = [0, 0, 1], p = [0, 0, 0], d = 0, w = 1;
+  const st = [], ev = [];
+  const rot = (a, b, t) => { const c = Math.cos(t), n = Math.sin(t);
+    return [[a[0]*c + b[0]*n, a[1]*c + b[1]*n, a[2]*c + b[2]*n], [b[0]*c - a[0]*n, b[1]*c - a[1]*n, b[2]*c - a[2]*n]]; };
+  for (const c of s) {
+    const j = r() * 2 - 1;
+    if (c === "F") {
+      const q = [p[0] + H[0], p[1] + H[1], p[2] + H[2]];
+      ev.push([0, p, q, d, w]); p = q;
+      if (sp.trop) { H = [H[0], H[1] - sp.trop, H[2]]; const n = Math.hypot(...H); H = H.map(v => v / n); }
+    } else if (c === "+") [H, L] = rot(H, L, turn * (1 + 0.3 * j));
+    else if (c === "-") [H, L] = rot(H, L, -turn * (1 + 0.3 * j));
+    else if (c === "&") { const x = rot(H, U, -turn); H = x[0]; U = x[1]; }
+    else if (c === "^") { const x = rot(H, U, turn); H = x[0]; U = x[1]; }
+    else if (c === "/") [L, U] = rot(L, U, roll);
+    else if (c === "!") w *= 0.7;
+    else if (c === "[") { [L, U] = rot(L, U, 137.5 * D); st.push([p, H, L, U, d, w]); d++; }
+    else if (c === "]") { if (sp.leaf && !sp.daisy && !sp.bell) ev.push([1, p, H, j]); const t = st.pop(); if (t) [p, H, L, U, d, w] = t; }
+    else if (c === "L" && sp.leaf) ev.push([1, p, H, j]);
+    else if (c === "K" && sp.bell) ev.push([2, p, H, j]);
+    else if (c === "A" && sp.daisy) ev.push([3, p, H, j]);
+  }
+  return ev;
+}
+
+(function sunprint() {
+  const cv = document.getElementById("sunprint");
+  const ctx = cv.getContext("2d");
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const r = rng((Math.random() * 1e9) | 0);
+  let beds = [];
+  function layout() {
+    const dpr = Math.min(2, devicePixelRatio || 1), W = innerWidth, H = innerHeight;
+    cv.width = W * dpr; cv.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    beds = [];
+    // Tall plants stand in the margins either side of the print, short ones between.
+    const n = Math.max(5, Math.round(W / 150));
+    for (let i = 0; i < n; i++) {
+      const x = (i + 0.3 + r() * 0.4) / n * W;
+      const edge = Math.min(x, W - x) / W;
+      // On a phone the print fills the width, so tall plants rise above it instead.
+      const tall = edge < 0.16 || (W < 640 && r() < 0.6);
+      const kind = tall ? [0, 1, 2, 5][Math.floor(r() * 4)] : [3, 4, 3][Math.floor(r() * 3)];
+      const sp = PLANTS[kind];
+      const h = H * (tall ? 0.42 + r() * 0.4 : 0.07 + r() * 0.06);
+      const ev = grow(sp, rng((r() * 1e9) | 0));
+      const yaw = r() * 6.28, cy = Math.cos(yaw), sy = Math.sin(yaw);
+      let minx = 1e9, maxx = -1e9, top = 1e-6;
+      for (const e of ev) if (e[0] === 0) for (const v of [e[1], e[2]]) {
+        const px = v[0] * cy + v[2] * sy; minx = Math.min(minx, px); maxx = Math.max(maxx, px); top = Math.max(top, v[1]);
+      }
+      const s = Math.min(h / top, (W / n) * (tall ? 1.6 : 1.1) / Math.max(1e-6, maxx - minx));
+      beds.push({ ev, s, x0: x - (minx + maxx) / 2 * s, cy, sy, H });
+    }
+  }
+  function draw(t) {
+    ctx.clearRect(0, 0, innerWidth, innerHeight);
+    ctx.strokeStyle = ctx.fillStyle = "#EEF3F2"; ctx.lineCap = "round";
+    ctx.globalAlpha = 0.16;
+    for (const b of beds) {
+      const map = v => [b.x0 + (v[0] * b.cy + v[2] * b.sy) * b.s, b.H - v[1] * b.s];
+      const n = Math.floor(b.ev.length * t);
+      for (let i = 0; i < n; i++) {
+        const e = b.ev[i];
+        if (e[0] === 0) {
+          const a = map(e[1]), c = map(e[2]);
+          ctx.lineWidth = Math.max(0.6, b.s * 0.08 * e[4] * Math.pow(0.8, e[3]));
+          ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(c[0], c[1]); ctx.stroke();
+        } else {
+          const a = map(e[1]);
+          const len = Math.max(3, Math.min(13, b.s * 1.1));
+          if (e[0] === 1) {
+            const dx = e[2][0] * b.cy + e[2][2] * b.sy, dy = -e[2][1] + 0.3, n2 = Math.hypot(dx, dy) || 1;
+            const ux = dx / n2, uy = dy / n2, L2 = len * (1 + 0.2 * e[3]), W2 = L2 * 0.32;
+            ctx.beginPath(); ctx.moveTo(a[0], a[1]);
+            ctx.quadraticCurveTo(a[0] + ux * L2 / 2 - uy * W2, a[1] + uy * L2 / 2 + ux * W2, a[0] + ux * L2, a[1] + uy * L2);
+            ctx.quadraticCurveTo(a[0] + ux * L2 / 2 + uy * W2, a[1] + uy * L2 / 2 - ux * W2, a[0], a[1]);
+            ctx.fill();
+          } else {
+            ctx.beginPath(); ctx.arc(a[0], a[1], len * (e[0] === 3 ? 0.5 : 0.35), 0, 6.283); ctx.fill();
+          }
+        }
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+  layout();
+  if (reduce) draw(1);
+  else {
+    const t0 = performance.now();
+    const tick = now => { const t = Math.min(1, (now - t0) / 5000); draw(1 - Math.pow(1 - t, 2.4)); if (t < 1) requestAnimationFrame(tick); };
+    requestAnimationFrame(tick);
+  }
+  let rt; addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => { layout(); draw(1); }, 150); });
+})();
+
+(function garden() {
+  const veil = document.getElementById("veil");
+  const note = document.getElementById("note");
+  const startBtn = document.getElementById("start");
+  const seedIn = document.getElementById("seed");
+  const canvas = document.getElementById("canvas");
+  const params = new URLSearchParams(location.search);
+  const seed = (params.get("seed") || "").replace(/[^0-9]/g, "");
+  let started = false;
+  if (seed) seedIn.value = seed;
+
+  document.getElementById("seedform").addEventListener("submit", e => {
+    e.preventDefault();
+    const v = seedIn.value.replace(/[^0-9]/g, "");
+    location.search = v ? "?seed=" + v : "";
+  });
+  // Typing a seed must not steer the walker.
+  for (const ev of ["keydown", "keyup"]) seedIn.addEventListener(ev, e => e.stopPropagation());
+
+  // World and light can be chosen before Start. Before it they decide what
+  // is grown; after it a new world grows when the World slider is let go.
+  const WORLDS = [["map 256", 256, 0], ["map 512", 512, 0], ["map 1024", 1024, 0],
+                  ["small planet", 256, 1], ["planet", 512, 1], ["large planet", 1024, 1]];
+  const worldS = document.getElementById("c-world");
+  const lightS = document.getElementById("c-light");
+  const sizeIdx = ({ "256": 0, "1024": 2 }[params.get("size")] ?? 1);
+  worldS.value = params.get("world") === "planet" ? 3 + sizeIdx : sizeIdx;
+  function showWorld() {
+    const w = WORLDS[+worldS.value];
+    document.getElementById("v-world").textContent = w[0];
+    if (!started) {
+      note.textContent = w[2] === 1
+        ? "Grows a planet " + w[1] + " m around. Choose another world below first if you like."
+        : "Grows a map " + w[1] + " m across. Choose another world below first if you like.";
+    }
+  }
+  showWorld();
+  worldS.disabled = false;
+  lightS.disabled = false;
+  for (const s of [worldS, lightS]) {
+    for (const ev of ["keydown", "keyup"]) s.addEventListener(ev, e => e.stopPropagation());
+  }
+  worldS.addEventListener("input", showWorld);
+  worldS.addEventListener("change", () => {
+    if (!window.garden) return;
+    const w = WORLDS[+worldS.value];
+    window.garden._garden_set(11, w[1]);
+    window.garden._garden_set(12, w[2]);
+    window.garden._garden_set(13, 0);
+    canvas.focus();
+  });
+  lightS.addEventListener("input", () => {
+    document.getElementById("v-light").textContent = +lightS.value ? "sun" : "even";
+    if (window.garden) window.garden._garden_set(14, +lightS.value);
+  });
+
+  function boot() {
+    if (started) return;
+    started = true;
+    startBtn.textContent = WORLDS[+worldS.value][2] === 1 ? "Growing the planet" : "Growing the map";
+    note.textContent = "This takes a few seconds";
+    canvas.focus();
+    // Let the label paint before the map is generated in one long step.
+    setTimeout(() => {
+      window.flowGfxOnStart = () => veil.classList.add("gone");
+      createFlowModule({
+        print: t => { if (params.get("profile") === "1") console.log(t); },
+        printErr: t => console.warn(t),
+        canvas,
+        preRun: [mod => {
+          if (seed) mod.ENV.LSYS_SEED = seed;
+          // The world chosen before Start: its size and kind are set first,
+          // and the world is grown once, from them.
+          const w = WORLDS[+worldS.value];
+          mod.ENV.LSYS_MAP = String(w[1]);
+          if (w[2] === 1) mod.ENV.LSYS_PLANET = "1";
+          if (params.get("profile") === "1") mod.ENV.LSYS_PROFILE = "1";
+        }]
+      }).then(mod => {
+        window.garden = mod;
+        try { mod.callMain([]); } catch (e) { if (!(e && e.name === "ExitStatus")) console.error(e); }
+        veil.classList.add("gone");
+        controls(mod);
+      }).catch(e => {
+        started = false;
+        startBtn.textContent = "Try again";
+        note.textContent = "The garden did not load: " + e;
+      });
+    }, 60);
+  }
+  veil.addEventListener("click", boot);
+
+  /* ------------------------------------------------ conditions and the mouse */
+  const SPEEDS = ["x0.25", "x0.5", "x1", "x2", "x4", "x8", "x16", "x32", "x64", "x128", "x256", "x512", "x1024"];
+  const DAYS = [0, 40, 150, 600, 1800];
+  function rainName(v) {
+    if (v <= 0) return "auto";
+    const x = (v - 1) / 99;
+    return x < 0.08 ? "dry" : x < 0.4 ? "showers" : x < 0.8 ? "rain" : "storm";
+  }
+  function windName(v) {
+    const x = v / 10;
+    return x < 0.3 ? "calm" : x < 1.4 ? "breeze" : x < 2.6 ? "gusty" : "gale";
+  }
+  function clock(m) {
+    const h = Math.floor(m / 60), n = Math.floor(m % 60);
+    return String(h).padStart(2, "0") + ":" + String(n).padStart(2, "0");
+  }
+  function controls(mod) {
+    const set = (k, v) => mod._garden_set(k, v);
+    const get = k => mod._garden_get(k);
+    const el = id => document.getElementById(id);
+    const rainS = el("c-rain"), windS = el("c-wind"), hourS = el("c-hour"), dayS = el("c-day"), speedS = el("c-speed");
+    set(14, +lightS.value);
+    for (const s of [rainS, windS, hourS, dayS, speedS]) {
+      s.disabled = false;
+      for (const ev of ["keydown", "keyup"]) s.addEventListener(ev, e => e.stopPropagation());
+    }
+    rainS.addEventListener("input", () => {
+      const v = +rainS.value;
+      set(0, v <= 0 ? -1 : (v - 1) / 99);
+      el("v-rain").textContent = rainName(v);
+    });
+    windS.addEventListener("input", () => {
+      set(1, +windS.value / 10);
+      el("v-wind").textContent = windName(+windS.value);
+    });
+    let hourDrag = false;
+    hourS.addEventListener("pointerdown", () => { hourDrag = true; });
+    addEventListener("pointerup", () => { hourDrag = false; });
+    hourS.addEventListener("input", () => {
+      set(3, +hourS.value / 1440);
+      el("v-hour").textContent = clock(+hourS.value);
+    });
+    dayS.addEventListener("input", () => {
+      const d = DAYS[+dayS.value];
+      set(2, d);
+      el("v-day").textContent = d === 0 ? "held" : d + " s";
+    });
+    speedS.addEventListener("input", () => {
+      set(4, +speedS.value);
+      el("v-speed").textContent = SPEEDS[+speedS.value];
+    });
+    // Follow the world: the hour moves, the keys change speed and weather.
+    setInterval(() => {
+      if (!hourDrag) {
+        const m = Math.round(get(3) * 1440) % 1440;
+        hourS.value = m;
+        el("v-hour").textContent = clock(m);
+      }
+      const sp = Math.round(get(4));
+      if (+speedS.value !== sp) { speedS.value = sp; el("v-speed").textContent = SPEEDS[sp]; }
+      if (get(9) > 0.5) {
+        el("v-rain").textContent = "auto, " + rainName(1 + get(0) * 99);
+      }
+    }, 250);
+
+    // Click to capture the mouse, move it to look, click again to plant.
+    const hint = el("hint");
+    hint.classList.add("on");
+    canvas.addEventListener("mousedown", e => {
+      if (document.pointerLockElement === canvas) {
+        set(8, 1);
+      } else {
+        set(10, 1);
+        canvas.requestPointerLock();
+      }
+    }, true);
+    document.addEventListener("pointerlockchange", () => {
+      const locked = document.pointerLockElement === canvas;
+      set(10, locked ? 1 : 0);
+      hint.textContent = locked ? "Move to look, click to plant. Esc lets go." : "Click the garden to look with the mouse. Esc lets go.";
+    });
+    document.addEventListener("pointerlockerror", () => set(10, 0));
+    addEventListener("mousemove", e => {
+      if (document.pointerLockElement === canvas) {
+        set(6, e.movementX);
+        set(7, e.movementY);
+      }
+    });
+    // Shift runs.
+    addEventListener("keydown", e => { if (e.key === "Shift") set(5, 1); });
+    addEventListener("keyup", e => { if (e.key === "Shift") set(5, 0); });
+  }
+  // Esc only lets go of the mouse; it never reaches the garden, where it
+  // would quit.
+  document.addEventListener("keydown", e => { if (e.key === "Escape") e.stopPropagation(); }, true);
+  document.addEventListener("keyup", e => { if (e.key === "Escape") e.stopPropagation(); }, true);
+  if (params.get("autostart") === "1") boot();
+  // Arrow keys and space belong to the game, never to the page.
+  addEventListener("keydown", e => {
+    if (document.activeElement !== seedIn && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " "].includes(e.key)) e.preventDefault();
+  }, { passive: false });
+})();
+</script>
+</body>
+</html>

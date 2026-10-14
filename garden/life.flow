@@ -1,0 +1,846 @@
+# The living map: every plant is born from a seed, grows, flowers, sets
+# seed, withers and dies, and its seeds carry its genes with mutation.
+#
+# LIFE HISTORY
+#   Each species has a growth time, a lifespan, a flowering window in the
+#   year, a seed count, a dispersal distance, a minimum spacing and a niche:
+#   a band of height above water and of moisture. Annuals die each autumn.
+#   Perennial herbs die back in winter and regrow in spring. Woody plants
+#   grow on through the years; deciduous ones colour in autumn and drop
+#   their leaves.
+#
+# STAGES
+#   SEED     dormant until spring, germinates with a chance set by how well
+#            the ground suits it and whether a neighbour is too close
+#   GROW     the turtle reveals more of the string as the plant grows
+#   ADULT    flowers in its window, then sets seed
+#   WITHER   colours fade and leaves fall over ten days
+#   DEAD     a grey snag for a while, then gone
+#
+# GENES
+#   angle    multiplies the grammar's turn angle
+#   leaf     multiplies leaf length
+#   height   multiplies the plant's size
+#   colour   the flower colour
+#   A seed takes its parent's genes, each nudged by a small random amount.
+#   Angle and leaf change the model the turtle builds, so a lineage can
+#   drift into a different shape.
+#
+# BIOMES AND SEASONS
+#   Each species also has a temperature range. A plant placed outside the
+#   middle of its height, moisture and temperature ranges is a poor fit: it
+#   grows smaller, slower and sets fewer seeds. Temperature moves with the
+#   season (terrain.flow): below its range a plant is dormant, above it heat
+#   slows it. Seeds wait at least two weeks, then sprout when it is warm and
+#   wet enough, so the tropics sprout all year and the north only in spring.
+#   Frost kills young seedlings of warm-climate species, and annuals die at
+#   the first hard frost. Perennial herbs die back to the ground in the cold.
+#
+# WEATHER
+#   Wetness, the ground's memory of rain (garden/sky.flow), shifts every
+#   niche: in a wet spell drier ground suits wet-ground species, in a
+#   drought only the wettest ground does. Seeds take and plants grow faster
+#   when it is wet.
+#
+# SELECTION
+#   Light: a plant is shaded by taller neighbours. Shade slows growth and
+#   cuts seed output, so in crowded ground taller plants leave more seeds.
+#   Height is not free: seed output falls as the height gene rises. Shade-
+#   tolerant species (ferns, foxgloves) feel shade less. A plant kept in
+#   deep shade may die of it, which thins a crowded wood as it grows.
+#
+# SPACE
+#   Each 6 m cell holds at most six herbs and shrubs, and a seed rarely
+#   takes where two of its own kind already grow. A few seeds of random
+#   species drift in from beyond the map every day, so a species that dies
+#   out can return.
+
+import "./common.flow"
+import "./species.flow"
+import "./calendar.flow"
+import "./terrain.flow"
+import "./models.flow"
+import "./sky.flow"
+
+const MAX_PLANTS: i32 = 64000
+# Herbs and shrubs per 6 m cell: the local carrying capacity.
+const CELL_CAP: i32 = 6
+const HCELL: f64 = 6.0
+# The spatial hash: cells across the map, set per map size.
+const HG_MAX: i32 = 180
+let mut HG: i32 = 88
+
+const ST_SEED: i32 = 0
+const ST_GROW: i32 = 1
+const ST_ADULT: i32 = 2
+const ST_WITHER: i32 = 3
+const ST_DEAD: i32 = 4
+
+const K_ANNUAL: i32 = 0
+const K_HERB: i32 = 1
+const K_WOODY: i32 = 2
+
+# Life history per species.
+let mut lf_kind: ptr<i32> = null
+let mut lf_decid: ptr<i32> = null
+let mut lf_grow: ptr<f64> = null
+let mut lf_life: ptr<f64> = null
+let mut lf_fl0: ptr<f64> = null
+let mut lf_fl1: ptr<f64> = null
+let mut lf_seeds: ptr<f64> = null
+let mut lf_disp: ptr<f64> = null
+let mut lf_space: ptr<f64> = null
+let mut lf_e0: ptr<f64> = null
+let mut lf_e1: ptr<f64> = null
+let mut lf_m0: ptr<f64> = null
+let mut lf_m1: ptr<f64> = null
+let mut lf_tol: ptr<f64> = null
+let mut lf_autumn: ptr<i32> = null
+let mut lf_weight: ptr<f64> = null
+let mut lf_t0: ptr<f64> = null
+let mut lf_t1: ptr<f64> = null
+
+# Plants.
+let mut n_plants: i32 = 0
+let mut free_top: i32 = 0
+let mut free_list: ptr<i32> = null
+# Slots freed during a step wait here until the hash is rebuilt, so a slot
+# still linked into a hash chain is never reused in the same step.
+let mut pending: ptr<i32> = null
+let mut pending_n: i32 = 0
+let mut in_used: ptr<i32> = null
+let mut in_sp: ptr<i32> = null
+let mut in_m: ptr<i32> = null
+let mut in_stage: ptr<i32> = null
+let mut in_age: ptr<f32> = null
+let mut in_gage: ptr<f32> = null
+let mut in_sg: ptr<f32> = null
+let mut in_st: ptr<f32> = null
+let mut in_life: ptr<f32> = null
+let mut in_x: ptr<f32> = null
+let mut in_y: ptr<f32> = null
+let mut in_z: ptr<f32> = null
+let mut in_cy: ptr<f32> = null
+let mut in_sy: ptr<f32> = null
+let mut in_ga: ptr<f32> = null
+let mut in_gl: ptr<f32> = null
+let mut in_gh: ptr<f32> = null
+let mut in_flower: ptr<i32> = null
+let mut in_gen: ptr<i32> = null
+let mut in_light: ptr<f32> = null
+let mut in_seedacc: ptr<f32> = null
+let mut in_next: ptr<i32> = null
+# Derived each step for drawing: draw scale and revealed fraction.
+let mut in_s: ptr<f32> = null
+let mut in_frac: ptr<f32> = null
+# The place: its average temperature, and how well it suits the species.
+let mut in_tb: ptr<f32> = null
+let mut in_fit: ptr<f32> = null
+
+let mut hash_head: ptr<i32> = null
+let mut hash_count: ptr<i32> = null
+
+# Where the walker stands, so nothing sprouts underfoot.
+let mut walker_x: f64 = 0.0
+let mut walker_z: f64 = 0.0
+
+let mut births: i32 = 0
+let mut sp_births: ptr<i32> = null
+let mut deaths: i32 = 0
+let mut seeds_cast: i32 = 0
+let mut life_tick: i32 = 0
+let mut last_doy: f64 = 0.0
+
+function set_life(sp: i32, kind: i32, decid: i32, grow: f64, life: f64, fl0: f64, fl1: f64,
+                  seeds: f64, disp: f64, space: f64) -> void {
+    lf_kind[sp] = kind
+    lf_decid[sp] = decid
+    lf_grow[sp] = grow
+    lf_life[sp] = life
+    lf_fl0[sp] = fl0
+    lf_fl1[sp] = fl1
+    lf_seeds[sp] = seeds
+    lf_disp[sp] = disp
+    lf_space[sp] = space
+}
+
+function set_temp(sp: i32, t0: f64, t1: f64) -> void {
+    lf_t0[sp] = t0
+    lf_t1[sp] = t1
+}
+
+function set_niche(sp: i32, e0: f64, e1: f64, m0: f64, m1: f64, tol: f64, weight: f64,
+                   autumn: i32) -> void {
+    lf_e0[sp] = e0
+    lf_e1[sp] = e1
+    lf_m0[sp] = m0
+    lf_m1[sp] = m1
+    lf_tol[sp] = tol
+    lf_weight[sp] = weight
+    lf_autumn[sp] = autumn
+}
+
+function define_life() -> void {
+    lf_kind = alloc_i32(MAX_SPECIES)
+    lf_decid = alloc_i32(MAX_SPECIES)
+    lf_grow = alloc_f64(MAX_SPECIES)
+    lf_life = alloc_f64(MAX_SPECIES)
+    lf_fl0 = alloc_f64(MAX_SPECIES)
+    lf_fl1 = alloc_f64(MAX_SPECIES)
+    lf_seeds = alloc_f64(MAX_SPECIES)
+    lf_disp = alloc_f64(MAX_SPECIES)
+    lf_space = alloc_f64(MAX_SPECIES)
+    lf_e0 = alloc_f64(MAX_SPECIES)
+    lf_e1 = alloc_f64(MAX_SPECIES)
+    lf_m0 = alloc_f64(MAX_SPECIES)
+    lf_m1 = alloc_f64(MAX_SPECIES)
+    lf_tol = alloc_f64(MAX_SPECIES)
+    lf_autumn = alloc_i32(MAX_SPECIES)
+    lf_weight = alloc_f64(MAX_SPECIES)
+    lf_t0 = alloc_f64(MAX_SPECIES)
+    lf_t1 = alloc_f64(MAX_SPECIES)
+    #        species temperature range (0 polar, 1 tropical)
+    set_temp(0, 0.30, 0.75)
+    set_temp(1, 0.30, 0.82)
+    set_temp(2, 0.30, 0.95)
+    set_temp(3, 0.18, 0.95)
+    set_temp(4, 0.38, 0.98)
+    set_temp(5, 0.30, 0.72)
+    set_temp(6, 0.30, 0.76)
+    set_temp(7, 0.24, 0.66)
+    set_temp(8, 0.46, 0.96)
+    set_temp(9, 0.22, 0.82)
+    set_temp(10, 0.50, 1.00)
+    set_temp(11, 0.30, 0.92)
+    set_temp(12, 0.24, 0.70)
+    set_temp(13, 0.34, 0.76)
+    set_temp(14, 0.30, 0.70)
+    set_temp(SP_OAK, 0.38, 0.76)
+    set_temp(SP_PINE, 0.10, 0.52)
+    set_temp(SP_BIRCH, 0.18, 0.60)
+    set_temp(SP_WILLOW, 0.34, 0.82)
+
+    #        species       kind      decid grow  life  flower    seeds disp space
+    set_life(0, K_WOODY, 1, 60.0, 1100.0, 40.0, 56.0, 4.0, 7.0, 2.0)
+    set_life(1, K_HERB, 0, 25.0, 700.0, 40.0, 60.0, 5.0, 12.0, 0.9)
+    set_life(2, K_ANNUAL, 0, 20.0, 90.0, 24.0, 50.0, 9.0, 9.0, 0.8)
+    set_life(3, K_HERB, 0, 10.0, 400.0, 30.0, 50.0, 6.0, 6.0, 0.5)
+    set_life(4, K_WOODY, 0, 50.0, 1200.0, 30.0, 50.0, 3.0, 6.0, 1.6)
+    set_life(5, K_WOODY, 1, 110.0, 1400.0, 30.0, 50.0, 6.0, 18.0, 3.0)
+    set_life(6, K_HERB, 0, 18.0, 400.0, 40.0, 64.0, 6.0, 10.0, 0.7)
+    set_life(7, K_HERB, 0, 12.0, 300.0, 4.0, 20.0, 3.0, 4.0, 0.5)
+    set_life(8, K_HERB, 0, 25.0, 600.0, 26.0, 50.0, 4.0, 5.0, 0.8)
+    set_life(9, K_HERB, 0, 10.0, 220.0, 2.0, 44.0, 14.0, 45.0, 0.5)
+    set_life(10, K_ANNUAL, 0, 28.0, 90.0, 34.0, 56.0, 10.0, 6.0, 1.0)
+    set_life(11, K_HERB, 0, 25.0, 800.0, 30.0, 60.0, 7.0, 18.0, 0.6)
+    set_life(12, K_WOODY, 1, 50.0, 1100.0, 44.0, 70.0, 6.0, 30.0, 1.8)
+    set_life(13, K_WOODY, 1, 45.0, 1300.0, 26.0, 52.0, 3.0, 10.0, 1.6)
+    set_life(14, K_HERB, 0, 30.0, 200.0, 28.0, 48.0, 12.0, 5.0, 0.6)
+    set_life(SP_OAK, K_WOODY, 1, 230.0, 2600.0, 52.0, 70.0, 6.0, 14.0, 6.0)
+    set_life(SP_PINE, K_WOODY, 0, 190.0, 2200.0, 40.0, 60.0, 6.0, 28.0, 4.5)
+    set_life(SP_BIRCH, K_WOODY, 1, 140.0, 1300.0, 40.0, 60.0, 6.0, 45.0, 4.5)
+    set_life(SP_WILLOW, K_WOODY, 1, 130.0, 1500.0, 20.0, 40.0, 7.0, 25.0, 5.0)
+
+    #         species  height band   moisture  shade  weight  autumn colour
+    set_niche(0, 1.0, 22.0, 0.25, 0.85, 0.3, 1.0, 0xC0502A)
+    set_niche(1, 0.5, 25.0, 0.45, 1.0, 0.8, 2.0, 0x000000)
+    set_niche(2, 0.5, 30.0, 0.0, 0.6, 0.2, 2.0, 0x000000)
+    set_niche(3, 0.3, 30.0, 0.2, 0.9, 0.3, 0.0, 0x000000)
+    set_niche(4, 3.0, 40.0, 0.0, 0.55, 0.3, 1.2, 0x000000)
+    set_niche(5, 1.0, 25.0, 0.3, 0.9, 0.3, 0.6, 0xD8B040)
+    set_niche(6, 0.5, 20.0, 0.3, 0.8, 0.2, 2.4, 0x000000)
+    set_niche(7, 0.5, 18.0, 0.3, 0.75, 0.2, 2.2, 0x000000)
+    set_niche(8, 2.0, 30.0, 0.0, 0.45, 0.1, 2.2, 0x000000)
+    set_niche(9, 0.3, 30.0, 0.15, 0.85, 0.2, 2.4, 0x000000)
+    set_niche(10, 0.5, 15.0, 0.3, 0.75, 0.1, 1.6, 0x000000)
+    set_niche(11, -0.4, 1.2, 0.8, 1.0, 0.2, 3.0, 0x000000)
+    set_niche(12, 1.0, 25.0, 0.35, 0.9, 0.5, 1.2, 0xB83040)
+    set_niche(13, 1.0, 20.0, 0.3, 0.8, 0.3, 1.0, 0xA0602A)
+    set_niche(14, 1.0, 25.0, 0.45, 0.95, 0.8, 1.8, 0x000000)
+    set_niche(SP_OAK, 1.0, 24.0, 0.4, 0.95, 0.5, 1.0, 0xA8642A)
+    set_niche(SP_PINE, 6.0, 50.0, 0.0, 0.6, 0.4, 1.0, 0x000000)
+    set_niche(SP_BIRCH, 1.0, 30.0, 0.3, 0.9, 0.2, 1.0, 0xE8C040)
+    set_niche(SP_WILLOW, 0.1, 2.5, 0.75, 1.0, 0.3, 1.0, 0xD8C850)
+}
+
+function life_alloc() -> void {
+    free_list = alloc_i32(MAX_PLANTS)
+    pending = alloc_i32(MAX_PLANTS)
+    in_used = alloc_i32(MAX_PLANTS)
+    in_sp = alloc_i32(MAX_PLANTS)
+    in_m = alloc_i32(MAX_PLANTS)
+    in_stage = alloc_i32(MAX_PLANTS)
+    in_age = alloc_f32(MAX_PLANTS)
+    in_gage = alloc_f32(MAX_PLANTS)
+    in_sg = alloc_f32(MAX_PLANTS)
+    in_st = alloc_f32(MAX_PLANTS)
+    in_life = alloc_f32(MAX_PLANTS)
+    in_x = alloc_f32(MAX_PLANTS)
+    in_y = alloc_f32(MAX_PLANTS)
+    in_z = alloc_f32(MAX_PLANTS)
+    in_cy = alloc_f32(MAX_PLANTS)
+    in_sy = alloc_f32(MAX_PLANTS)
+    in_ga = alloc_f32(MAX_PLANTS)
+    in_gl = alloc_f32(MAX_PLANTS)
+    in_gh = alloc_f32(MAX_PLANTS)
+    in_flower = alloc_i32(MAX_PLANTS)
+    in_gen = alloc_i32(MAX_PLANTS)
+    in_light = alloc_f32(MAX_PLANTS)
+    in_seedacc = alloc_f32(MAX_PLANTS)
+    in_next = alloc_i32(MAX_PLANTS)
+    in_s = alloc_f32(MAX_PLANTS)
+    in_frac = alloc_f32(MAX_PLANTS)
+    hash_head = alloc_i32(HG_MAX * HG_MAX)
+    hash_count = alloc_i32(HG_MAX * HG_MAX)
+    in_tb = alloc_f32(MAX_PLANTS)
+    in_fit = alloc_f32(MAX_PLANTS)
+    sp_births = alloc_i32(MAX_SPECIES)
+}
+
+# ---------------------------------------------------------------- niche
+
+# 1 inside [lo, hi], falling to 0 over `soft` outside it.
+function band(v: f64, lo: f64, hi: f64, soft: f64) -> f64 {
+    if v < lo { return 1.0 - ramp(lo - v, 0.0, soft) }
+    if v > hi { return 1.0 - ramp(v - hi, 0.0, soft) }
+    return 1.0
+}
+
+# How well the ground at (x, z) suits species sp, in [0, 1].
+function suit(sp: i32, x: f64, z: f64) -> f64 {
+    if z < 10.0 - MAP_HALF or z > MAP_HALF - 10.0 { return 0.0 }
+    if world_kind == WORLD_MAP and (x < 10.0 - MAP_HALF or x > MAP_HALF - 10.0) { return 0.0 }
+    let e: f64 = ground_h(x, z)
+    if e < lf_e0[sp] - 0.3 { return 0.0 }
+    # A wet spell moves every niche toward the dry side, a drought the other way.
+    let m: f64 = moisture(x, z) + (wetness - 0.45) * 0.35
+    let s: f64 = slope(x, z)
+    return band(e, lf_e0[sp], lf_e1[sp], 4.0) * band(m, lf_m0[sp], lf_m1[sp], 0.18)
+           * band(base_temp(x, z), lf_t0[sp], lf_t1[sp], 0.12) * (1.0 - ramp(s, 0.5, 0.95))
+}
+
+# How active a plant of species sp is at temperature t: 0 dormant in cold,
+# 1 in its range, falling off again in heat beyond it.
+function warmth_ok(sp: i32, t: f64) -> f64 {
+    return ramp(t, lf_t0[sp] - 0.2, lf_t0[sp] + 0.02) * (1.0 - 0.6 * ramp(t, lf_t1[sp] + 0.05, lf_t1[sp] + 0.3))
+}
+
+function wrap_x(x: f64) -> f64 {
+    if world_kind != WORLD_PLANET { return x }
+    let w: f64 = 2.0 * MAP_HALF
+    let mut v: f64 = x + MAP_HALF
+    v = v - floor(v / w) * w
+    return v - MAP_HALF
+}
+
+# ---------------------------------------------------------------- spatial hash
+
+function cell_of(x: f64, z: f64) -> i32 {
+    let mut cx: i32 = ((x + MAP_HALF) / HCELL) as i32
+    let mut cz: i32 = ((z + MAP_HALF) / HCELL) as i32
+    if cx < 0 { cx = 0 }
+    if cz < 0 { cz = 0 }
+    if cx >= HG { cx = HG - 1 }
+    if cz >= HG { cz = HG - 1 }
+    return cz * HG + cx
+}
+
+function hash_build() -> void {
+    for c in 0 to HG * HG {
+        hash_head[c] = -1
+        hash_count[c] = 0
+    }
+    for k in 0 to n_plants {
+        if in_used[k] == 1 {
+            let c: i32 = cell_of(in_x[k] as f64, in_z[k] as f64)
+            in_next[k] = hash_head[c]
+            hash_head[c] = k
+            if !is_tree(in_sp[k]) and in_stage[k] != ST_DEAD { hash_count[c] = hash_count[c] + 1 }
+        }
+    }
+}
+
+# The current drawn height of plant k in metres.
+function plant_height(k: i32) -> f64 {
+    let m: i32 = in_m[k]
+    if m < 0 { return 0.0 }
+    return (m_h[m] as f64) * (in_s[k] as f64)
+}
+
+# Whether a living plant (or seed) sits within r of (x, z). A tree seedling
+# only minds woody neighbours: it grows up through the herbs, but not under
+# another tree's crown, which caps how dense a wood can grow.
+function crowded(x: f64, z: f64, r: f64, skip: i32) -> bool {
+    return crowded_by(x, z, r, skip, false)
+}
+
+function crowded_by(x: f64, z: f64, r: f64, skip: i32, woody_only: bool) -> bool {
+    let c0x: i32 = ((x - r + MAP_HALF) / HCELL) as i32
+    let c1x: i32 = ((x + r + MAP_HALF) / HCELL) as i32
+    let c0z: i32 = ((z - r + MAP_HALF) / HCELL) as i32
+    let c1z: i32 = ((z + r + MAP_HALF) / HCELL) as i32
+    for cz in c0z to c1z + 1 {
+        for cx in c0x to c1x + 1 {
+            if cx >= 0 and cz >= 0 and cx < HG and cz < HG {
+                let mut k: i32 = hash_head[cz * HG + cx]
+                while k >= 0 {
+                    let counts: bool = !woody_only or lf_kind[in_sp[k]] == K_WOODY
+                    if k != skip and in_used[k] == 1 and in_stage[k] != ST_DEAD and counts {
+                        let dx: f64 = (in_x[k] as f64) - x
+                        let dz: f64 = (in_z[k] as f64) - z
+                        let mut rr: f64 = r * 0.5 + lf_space[in_sp[k]] * 0.5
+                        if woody_only and in_m[k] >= 0 {
+                            let crown: f64 = (m_r[in_m[k]] as f64) * (in_s[k] as f64) * 0.85
+                            if crown > rr { rr = crown }
+                        }
+                        if dx * dx + dz * dz < rr * rr { return true }
+                    }
+                    k = in_next[k]
+                }
+            }
+        }
+    }
+    return false
+}
+
+function same_in_cell(c: i32, sp: i32) -> i32 {
+    let mut n: i32 = 0
+    let mut k: i32 = hash_head[c]
+    while k >= 0 {
+        if in_used[k] == 1 and in_sp[k] == sp and in_stage[k] != ST_DEAD { n = n + 1 }
+        k = in_next[k]
+    }
+    return n
+}
+
+# Light reaching plant k: shade from taller neighbours, eased by tolerance.
+function compute_light(k: i32) -> void {
+    let h: f64 = plant_height(k)
+    let x: f64 = in_x[k] as f64
+    let z: f64 = in_z[k] as f64
+    let r: f64 = 2.0 + h * 0.6
+    let c0x: i32 = ((x - r + MAP_HALF) / HCELL) as i32
+    let c1x: i32 = ((x + r + MAP_HALF) / HCELL) as i32
+    let c0z: i32 = ((z - r + MAP_HALF) / HCELL) as i32
+    let c1z: i32 = ((z + r + MAP_HALF) / HCELL) as i32
+    let mut shade: f64 = 0.0
+    for cz in c0z to c1z + 1 {
+        for cx in c0x to c1x + 1 {
+            if cx >= 0 and cz >= 0 and cx < HG and cz < HG {
+                let mut j: i32 = hash_head[cz * HG + cx]
+                while j >= 0 {
+                    if j != k and in_used[j] == 1 and in_stage[j] >= ST_GROW and in_stage[j] <= ST_WITHER {
+                        let hj: f64 = plant_height(j)
+                        if hj > h {
+                            let dx: f64 = (in_x[j] as f64) - x
+                            let dz: f64 = (in_z[j] as f64) - z
+                            let reach: f64 = 1.0 + hj * 0.35
+                            let d2: f64 = dx * dx + dz * dz
+                            if d2 < reach * reach {
+                                shade = shade + (hj - h) / hj * (1.0 - sqrt(d2) / reach)
+                            }
+                        }
+                    }
+                    j = in_next[j]
+                }
+            }
+        }
+    }
+    let mut light: f64 = 1.0 / (1.0 + shade * 1.4)
+    let tol: f64 = lf_tol[in_sp[k]]
+    light = light + (1.0 - light) * tol
+    in_light[k] = light as f32
+}
+
+# ---------------------------------------------------------------- birth and death
+
+function new_slot() -> i32 {
+    if free_top > 0 {
+        free_top = free_top - 1
+        return free_list[free_top]
+    }
+    if n_plants < MAX_PLANTS {
+        n_plants = n_plants + 1
+        return n_plants - 1
+    }
+    return -1
+}
+
+function plants_alive() -> i32 {
+    return n_plants - free_top - pending_n
+}
+
+function remove_plant(k: i32) -> void {
+    let m: i32 = in_m[k]
+    if m >= 0 { m_ref[m] = m_ref[m] - 1 }
+    in_m[k] = -1
+    in_used[k] = 0
+    pending[pending_n] = k
+    pending_n = pending_n + 1
+}
+
+function release_pending() -> void {
+    for i in 0 to pending_n {
+        free_list[free_top] = pending[i]
+        free_top = free_top + 1
+    }
+    pending_n = 0
+}
+
+function clamp_gene(v: f64, lo: f64, hi: f64) -> f64 {
+    if v < lo { return lo }
+    if v > hi { return hi }
+    return v
+}
+
+function drift_colour(c: i32) -> i32 {
+    let r: i32 = col_r(c) + (rng_gauss() * 9.0) as i32
+    let g: i32 = col_g(c) + (rng_gauss() * 9.0) as i32
+    let b: i32 = col_b(c) + (rng_gauss() * 9.0) as i32
+    return pack_rgb(r, g, b)
+}
+
+# Place a plant. Genes come from the caller.
+function spawn(sp: i32, x: f64, z: f64, stage: i32, ga: f64, gl: f64, gh: f64,
+               flower: i32, gen: i32) -> i32 {
+    let k: i32 = new_slot()
+    if k < 0 { return -1 }
+    in_used[k] = 1
+    in_sp[k] = sp
+    in_m[k] = -1
+    in_stage[k] = stage
+    in_age[k] = 0.0
+    in_gage[k] = 0.0
+    in_sg[k] = 0.0
+    in_st[k] = 0.0
+    in_x[k] = x as f32
+    in_z[k] = z as f32
+    in_y[k] = surface_h(x, z) as f32
+    if sp == 11 { in_y[k] = ground_h(x, z) as f32 }
+    let yaw: f64 = 2.0 * PI * rng_unit()
+    in_cy[k] = cos(yaw) as f32
+    in_sy[k] = sin(yaw) as f32
+    in_ga[k] = ga as f32
+    in_gl[k] = gl as f32
+    in_gh[k] = gh as f32
+    in_flower[k] = flower
+    in_gen[k] = gen
+    in_light[k] = 1.0
+    in_seedacc[k] = 0.0
+    in_s[k] = 0.0
+    in_frac[k] = 0.0
+    in_life[k] = (lf_life[sp] * (0.75 + 0.5 * rng_unit())) as f32
+    in_next[k] = -1
+    in_tb[k] = base_temp(x, z) as f32
+    in_fit[k] = suit(sp, x, z) as f32
+    if stage != ST_SEED { give_model(k) }
+    return k
+}
+
+function give_model(k: i32) -> void {
+    let m: i32 = model_for(in_sp[k], in_ga[k] as f64, in_gl[k] as f64)
+    in_m[k] = m
+    if m >= 0 { m_ref[m] = m_ref[m] + 1 }
+}
+
+# Cast one seed from plant k.
+function cast_seed(k: i32) -> void {
+    let sp: i32 = in_sp[k]
+    if plants_alive() > MAX_PLANTS - 600 { return }
+    let a: f64 = 2.0 * PI * rng_unit()
+    let mut d: f64 = lf_disp[sp] * (0.15 - log(rng_unit() + 0.0001)) * 0.55
+    let mut x: f64 = wrap_x((in_x[k] as f64) + cos(a) * d)
+    let mut z: f64 = (in_z[k] as f64) + sin(a) * d
+    # Light seeds ride the wind downwind (+x).
+    if lf_disp[sp] >= 25.0 { x = wrap_x(x + d * 0.6 * wind_amp()) }
+    let s: f64 = suit(sp, x, z)
+    seeds_cast = seeds_cast + 1
+    if s < 0.08 or rng_unit() > s { return }
+    let c: i32 = cell_of(x, z)
+    if !is_tree(sp) and hash_count[c] >= CELL_CAP { return }
+    # A seed rarely takes where its own kind already crowds the ground:
+    # shared pests and spent soil. This keeps one species from filling
+    # every cell.
+    if !is_tree(sp) and same_in_cell(c, sp) >= 2 { return }
+    if crowded_by(x, z, lf_space[sp], -1, is_tree(sp)) { return }
+    let ga: f64 = clamp_gene((in_ga[k] as f64) * exp(0.07 * rng_gauss()), 0.55, 1.7)
+    let gl: f64 = clamp_gene((in_gl[k] as f64) * exp(0.08 * rng_gauss()), 0.5, 1.9)
+    let gh: f64 = clamp_gene((in_gh[k] as f64) * exp(0.08 * rng_gauss()), 0.5, 1.9)
+    let seed: i32 = spawn(sp, x, z, ST_SEED, ga, gl, gh, drift_colour(in_flower[k]), in_gen[k] + 1)
+    if seed >= 0 {
+        in_next[seed] = hash_head[c]
+        hash_head[c] = seed
+        if !is_tree(sp) { hash_count[c] = hash_count[c] + 1 }
+    }
+}
+
+# ---------------------------------------------------------------- the step
+
+# Whether species sp flowers (or fruits) on day d.
+function flowering(sp: i32, d: f64) -> bool {
+    return in_window(d, lf_fl0[sp], lf_fl1[sp])
+}
+
+
+function life_step(dt: f64) -> void {
+    if dt <= 0.0 { return }
+    let d: f64 = doy()
+    let new_year: bool = d < last_doy
+    last_doy = d
+    let sw: f64 = season_warmth()
+    life_tick = life_tick + 1
+
+    for k in 0 to n_plants {
+        if in_used[k] == 1 {
+            let sp: i32 = in_sp[k]
+            let st: i32 = in_stage[k]
+            in_age[k] = in_age[k] + (dt as f32)
+            in_st[k] = in_st[k] + (dt as f32)
+            let t_now: f64 = (in_tb[k] as f64) + sw
+            let tg: f64 = warmth_ok(sp, t_now)
+            let fit: f64 = in_fit[k] as f64
+
+            if st == ST_SEED {
+                # After two weeks a seed sprouts when it is warm and wet
+                # enough; seeds that wait too long rot.
+                if in_age[k] > 15.0 and tg > 0.5 {
+                    let p: f64 = 0.12 * dt * (0.3 + 1.4 * wetness) * tg
+                    if rng_unit() < p {
+                        let wdx: f64 = (in_x[k] as f64) - walker_x
+                        let wdz: f64 = (in_z[k] as f64) - walker_z
+                        # Nothing sprouts underfoot, and no tree close enough to
+                        # grow its crown over the walker's head.
+                        let mut keep: f64 = 2.0
+                        if is_tree(sp) or lf_kind[sp] == K_WOODY { keep = 6.0 }
+                        let underfoot: bool = wdx * wdx + wdz * wdz < keep * keep
+                        if underfoot or crowded_by(in_x[k] as f64, in_z[k] as f64, lf_space[sp], k,
+                                                   is_tree(sp)) {
+                            remove_plant(k)
+                        } else {
+                            in_stage[k] = ST_GROW
+                            in_age[k] = 0.0
+                            in_st[k] = 0.0
+                            give_model(k)
+                            births = births + 1
+                            sp_births[sp] = sp_births[sp] + 1
+                        }
+                    }
+                }
+                if in_used[k] == 1 and in_stage[k] == ST_SEED and in_age[k] > 170.0 {
+                    remove_plant(k)
+                }
+            } else {
+                if (k + life_tick) % 40 == 0 { compute_light(k) }
+                let light: f64 = in_light[k] as f64
+                if st <= ST_ADULT {
+                    let gw: f64 = dt * light * clamp01(0.5 + wetness) * 1.15 * tg * (0.4 + 0.6 * fit)
+                    in_gage[k] = in_gage[k] + (gw as f32)
+                    in_sg[k] = in_sg[k] + (gw as f32)
+                }
+                # Herbs die back to the ground in the cold, and start again.
+                if lf_kind[sp] == K_HERB and tg < 0.03 { in_sg[k] = 0.0 }
+                if st == ST_GROW and (in_gage[k] as f64) >= lf_grow[sp] {
+                    in_stage[k] = ST_ADULT
+                    in_st[k] = 0.0
+                }
+                # Seed after flowering, at a rate set by light and paid for
+                # by height.
+                let mut fruiting: bool = in_window(d, lf_fl1[sp] - 4.0, lf_fl1[sp] + 10.0)
+                # Annuals have one season: they seed from maturity until they die.
+                if lf_kind[sp] == K_ANNUAL and d >= lf_fl0[sp] { fruiting = true }
+                if in_stage[k] == ST_ADULT and fruiting {
+                    let cost: f64 = 1.0 / sqrt(sqrt(in_gh[k] as f64) * (in_gh[k] as f64))
+                    in_seedacc[k] = in_seedacc[k] + ((lf_seeds[sp] * light * cost * fit * tg * dt / 14.0) as f32)
+                    while in_seedacc[k] >= 1.0 {
+                        in_seedacc[k] = in_seedacc[k] - 1.0
+                        cast_seed(k)
+                    }
+                }
+                # Old age, deep shade, and annuals at the end of the year.
+                if in_stage[k] <= ST_ADULT {
+                    let mut dies: bool = in_age[k] > in_life[k]
+                    if light < 0.4 and rng_unit() < 0.02 * dt * (1.0 - light / 0.4) { dies = true }
+                    # Annuals die at the first hard frost, or of age.
+                    if lf_kind[sp] == K_ANNUAL and t_now < lf_t0[sp] - 0.12 and in_age[k] > 12.0 { dies = true }
+                    if lf_kind[sp] == K_ANNUAL and in_age[k] > 140.0 { dies = true }
+                    # Frost kills the young of warm-climate species.
+                    if t_now < 0.08 and lf_t0[sp] > 0.2 and (in_gage[k] as f64) < lf_grow[sp] * 0.3
+                       and rng_unit() < 0.06 * dt { dies = true }
+                    if dies {
+                        in_stage[k] = ST_WITHER
+                        in_st[k] = 0.0
+                    }
+                }
+                if in_stage[k] == ST_WITHER and in_st[k] > 10.0 {
+                    in_stage[k] = ST_DEAD
+                    in_st[k] = 0.0
+                    deaths = deaths + 1
+                }
+                let mut snag: f32 = 14.0
+                if lf_kind[sp] == K_WOODY { snag = 40.0 }
+                if in_stage[k] == ST_DEAD and in_st[k] > snag {
+                    remove_plant(k)
+                }
+            }
+            if in_used[k] == 1 { update_shape(k, tg) }
+        }
+    }
+    seed_rain(dt)
+    hash_build()
+    release_pending()
+}
+
+# Seed rain from beyond the map: a few seeds a day of random species.
+let mut rain_acc: f64 = 0.0
+
+function seed_rain(dt: f64) -> void {
+    rain_acc = rain_acc + dt * 3.0
+    while rain_acc >= 1.0 {
+        rain_acc = rain_acc - 1.0
+        if plants_alive() < MAX_PLANTS - 600 {
+            let sp: i32 = weighted_species()
+            let x: f64 = (rng_unit() * 2.0 - 1.0) * (MAP_HALF - 16.0)
+            let z: f64 = (rng_unit() * 2.0 - 1.0) * (MAP_HALF - 16.0)
+            let c: i32 = cell_of(x, z)
+            if suit(sp, x, z) > 0.3 and (is_tree(sp) or hash_count[c] < CELL_CAP) {
+                let k: i32 = spawn(sp, x, z, ST_SEED, exp(0.06 * rng_gauss()), exp(0.07 * rng_gauss()),
+                                   exp(0.08 * rng_gauss()), drift_colour(pick_flower(sp)), 1)
+                if k >= 0 {
+                    in_next[k] = hash_head[c]
+                    hash_head[c] = k
+                    if !is_tree(sp) { hash_count[c] = hash_count[c] + 1 }
+                }
+            }
+        }
+    }
+}
+
+# Draw scale and revealed fraction from growth and the season.
+function update_shape(k: i32, tg: f64) -> void {
+    let sp: i32 = in_sp[k]
+    if in_stage[k] == ST_SEED {
+        in_frac[k] = 0.0
+        return
+    }
+    let grow: f64 = lf_grow[sp]
+    let mut g: f64 = (in_gage[k] as f64) / grow
+    if lf_kind[sp] == K_HERB {
+        # Perennial herbs regrow from the ground each spring.
+        let sg: f64 = (in_sg[k] as f64) / grow
+        if sg < g { g = sg }
+        # And stand only a stub through the cold; cattails stay up.
+        if sp != 11 { g = g * (0.08 + 0.92 * ramp(tg, 0.0, 0.25)) }
+    }
+    if g > 1.0 { g = 1.0 }
+    if g < 0.0 { g = 0.0 }
+    # A plant in a poor place grows stunted.
+    let gh: f64 = (in_gh[k] as f64) * (0.55 + 0.45 * (in_fit[k] as f64))
+    if lf_kind[sp] == K_WOODY {
+        in_s[k] = (gh * (0.22 + 0.78 * g)) as f32
+        let mut f: f64 = 0.25 + g * 1.2
+        if f > 1.0 { f = 1.0 }
+        in_frac[k] = f as f32
+    } else {
+        in_s[k] = gh as f32
+        in_frac[k] = g as f32
+    }
+}
+
+# ---------------------------------------------------------------- the first population
+
+# Pick a species with chance proportional to its weight.
+function weighted_species() -> i32 {
+    let mut total: f64 = 0.0
+    for sp in 0 to N_SPECIES { total = total + lf_weight[sp] }
+    let mut r: f64 = rng_unit() * total
+    for sp in 0 to N_SPECIES {
+        r = r - lf_weight[sp]
+        if r <= 0.0 { return sp }
+    }
+    return 0
+}
+
+# An established landscape: plants of all ages, herbs in patches, trees
+# where their niche is.
+function populate() -> void {
+    n_plants = 0
+    free_top = 0
+    pending_n = 0
+    for sp in 0 to N_SPECIES { sp_births[sp] = 0 }
+    births = 0
+    deaths = 0
+    seeds_cast = 0
+    # The grid's size follows the map: set it first, then clear all of it,
+    # so no cell from a smaller map's grid is left holding stale links.
+    HG = (map_size / HCELL) as i32 + 2
+    if HG > HG_MAX { HG = HG_MAX }
+    for c in 0 to HG_MAX * HG_MAX {
+        hash_head[c] = -1
+        hash_count[c] = 0
+    }
+    # More land, more plants, a little under in proportion.
+    let area: f64 = (map_size / 512.0) * (map_size / 512.0)
+    let mut target: i32 = (14000.0 * exp(0.8 * log(area))) as i32
+    if target > MAX_PLANTS * 2 / 3 { target = MAX_PLANTS * 2 / 3 }
+    let mut tries: i32 = 0
+    while plants_alive() < target and tries < target * 30 {
+        tries = tries + 1
+        let sp: i32 = weighted_species()
+        let mut x: f64 = (rng_unit() * 2.0 - 1.0) * (MAP_HALF - 12.0)
+        let mut z: f64 = (rng_unit() * 2.0 - 1.0) * (MAP_HALF - 12.0)
+        # Herbs and shrubs grow in patches around their own kind.
+        if !is_tree(sp) and plants_alive() > 400 and rng_unit() < 0.7 {
+            let j: i32 = rng_below(n_plants)
+            if in_used[j] == 1 and in_sp[j] == sp {
+                x = (in_x[j] as f64) + rng_gauss() * 3.5
+                z = (in_z[j] as f64) + rng_gauss() * 3.5
+            }
+        }
+        let s: f64 = suit(sp, x, z)
+        let cc: i32 = cell_of(x, z)
+        let full: bool = !is_tree(sp) and hash_count[cc] >= CELL_CAP
+        if s > 0.05 and rng_unit() < s * s and !full {
+            if !crowded(x, z, lf_space[sp], -1) {
+                let ga: f64 = exp(0.06 * rng_gauss())
+                let gl: f64 = exp(0.07 * rng_gauss())
+                let gh: f64 = exp(0.08 * rng_gauss())
+                let k: i32 = spawn(sp, x, z, ST_GROW, ga, gl, gh, drift_colour(pick_flower(sp)), 1)
+                if k >= 0 {
+                    let life: f64 = in_life[k] as f64
+                    let mut age: f64 = rng_unit() * life * 0.75
+                    if lf_kind[sp] != K_WOODY { age = rng_unit() * 60.0 + 10.0 }
+                    in_age[k] = age as f32
+                    in_gage[k] = (age * 0.8) as f32
+                    in_sg[k] = (doy() * 0.9) as f32
+                    if (in_gage[k] as f64) >= lf_grow[sp] { in_stage[k] = ST_ADULT }
+                    in_next[k] = hash_head[cc]
+                    hash_head[cc] = k
+                    if !is_tree(sp) { hash_count[cc] = hash_count[cc] + 1 }
+                    update_shape(k, warmth_ok(sp, (in_tb[k] as f64) + season_warmth()))
+                }
+            }
+        }
+    }
+    last_doy = doy()
+    hash_build()
+}
+
+# A seed planted by the walker: it germinates straight away.
+function plant_seed(sp: i32, x: f64, z: f64) -> i32 {
+    let k: i32 = spawn(sp, x, z, ST_GROW, 1.0, 1.0, 1.0, pick_flower(sp), 1)
+    if k >= 0 {
+        births = births + 1
+        let c: i32 = cell_of(x, z)
+        in_next[k] = hash_head[c]
+        hash_head[c] = k
+    }
+    return k
+}
+
+function stage_name(st: i32) -> string {
+    if st == ST_SEED { return "SEED" }
+    if st == ST_GROW { return "GROWING" }
+    if st == ST_ADULT { return "ADULT" }
+    if st == ST_WITHER { return "WITHERING" }
+    return "DEAD"
+}

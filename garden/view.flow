@@ -1,0 +1,1254 @@
+# Drawing the living map with stdlib/render3d.flow.
+#
+# GROUND
+#   A grid centred on the walker, rebuilt each frame: cells about a metre
+#   across underfoot, widening to eight at the fog line. Height, water, sand,
+#   rock, snow and the season's grass colour come from terrain.flow.
+#
+# PLANTS
+#   Plants are found through the spatial hash, cell by cell, skipping cells
+#   behind the camera or past the fog. Each is drawn at one of three levels:
+#
+#   full       a screen-space quad per segment, as wide as the branch radius
+#              projects; leaves as two triangles in the plane of the turtle's
+#              heading and left vector; flowers as depth-tested discs
+#   smaller    the same string at low resolution: branches as one-pixel
+#              lines down to a depth set by the plant's size on screen, and
+#              each leaf as a one-pixel stroke along its heading
+#
+#   The season and the plant's stage tint it: spring green, autumn colour,
+#   leaf fall, perennials dying back to straw, a withering plant browning,
+#   and a dead one standing grey. Flowers open only in their window.
+#
+#   The wind moves every node along the wind direction by the plant's sway
+#   times the node's height fraction to the power 1.5.
+#
+# GRASS
+#   Grass is not part of the population. Near the walker a tuft is placed
+#   in each 1.6 m cell, by a hash of the cell, when the ground is moist
+#   enough, and drawn from a few grass models.
+#
+# The renderer is capped at 640 x 480, so the scene renders at 480 x 320 and
+# is doubled into the 960 x 640 window.
+
+import "stdlib/gfx.flow"
+import "stdlib/render3d.flow"
+import "./common.flow"
+import "./species.flow"
+import "./calendar.flow"
+import "./terrain.flow"
+import "./models.flow"
+import "./life.flow"
+import "./sky.flow"
+
+const RW: i32 = 480
+const RH: i32 = 320
+const HUD3_H: i32 = 72
+const FOV_DEG: f32 = 64.0
+const NEAR: f32 = 0.1
+const FAR: f32 = 700.0
+# Fog and view range widen as the eye rises, so the map can be seen whole.
+let mut fog_near: f32 = 45.0
+let mut fog_far: f32 = 215.0
+let mut view_r: f64 = 215.0
+# Looking down from height reveals ground behind the horizontal heading.
+let mut cull_slack: f32 = 0.0
+const GRASS_DIST: f64 = 20.0
+const GRASS_CELL: f64 = 1.6
+const N_GRASS_MODELS: i32 = 6
+const SCRATCH_NODES: i32 = 160000
+const GROUND_N: i32 = 100
+# How far the walker sees on the ground, in metres. The fog closes in at it.
+const RENDER_DIST: f64 = 340.0
+
+let mut big: ptr<u8> = null
+let mut vp: ptr<f32> = null
+let mut proj: ptr<f32> = null
+let mut view_m: ptr<f32> = null
+let mut ident: ptr<f32> = null
+let mut mvp: ptr<f32> = null
+let mut foc: f32 = 1.0
+let mut half_h: f32 = 160.0
+let mut grass_m: ptr<i32> = null
+
+# Clip coordinates of the current model's nodes.
+let mut nc_x: ptr<f32> = null
+let mut nc_y: ptr<f32> = null
+let mut nc_z: ptr<f32> = null
+let mut nc_w: ptr<f32> = null
+
+# A small plant on screen draws few of its nodes, so they are transformed
+# on demand: nc_stamp marks which belong to the current draw.
+let mut nc_stamp: ptr<i32> = null
+let mut draw_id: i32 = 0
+let mut cur_n0: i32 = 0
+
+function need(i: i32) -> void {
+    if nc_stamp[i] == draw_id { return }
+    nc_stamp[i] = draw_id
+    let q: i32 = cur_n0 + i
+    let x: f32 = nd_x[q]
+    let y: f32 = nd_y[q]
+    let z: f32 = nd_z[q]
+    let bw: f32 = nd_hf[q]
+    nc_x[i] = mvp[0] * x + mvp[1] * y + mvp[2] * z + mvp[3] + wd_x * bw
+    nc_y[i] = mvp[4] * x + mvp[5] * y + mvp[6] * z + mvp[7] + wd_y * bw
+    nc_z[i] = mvp[8] * x + mvp[9] * y + mvp[10] * z + mvp[11] + wd_z * bw
+    nc_w[i] = mvp[12] * x + mvp[13] * y + mvp[14] * z + mvp[15] + wd_w * bw
+}
+
+# Camera for this frame.
+let mut cam_x: f32 = 0.0
+let mut cam_y: f32 = 1.65
+let mut cam_z: f32 = 0.0
+let mut cam_fx: f32 = 0.0
+let mut cam_fz: f32 = -1.0
+
+# Light, toward the sun: low in the west at the end of the day.
+let mut sun_x: f32 = -0.62
+let mut sun_y: f32 = 0.58
+let mut sun_z: f32 = 0.28
+
+let mut fog_r: f32 = 0.86
+let mut fog_g: f32 = 0.80
+let mut fog_b: f32 = 0.70
+
+# Per-plant wind displacement in clip space, per unit of bend weight.
+let mut wd_x: f32 = 0.0
+let mut wd_y: f32 = 0.0
+let mut wd_z: f32 = 0.0
+let mut wd_w: f32 = 0.0
+
+# The current plant's tint, set from season and stage before drawing.
+let mut t_stem: f32 = 0.0
+let mut t_stem_r: f32 = 0.0
+let mut t_stem_g: f32 = 0.0
+let mut t_stem_b: f32 = 0.0
+let mut t_leaf: f32 = 0.0
+let mut t_leaf_r: f32 = 0.0
+let mut t_leaf_g: f32 = 0.0
+let mut t_leaf_b: f32 = 0.0
+let mut t_dens: f32 = 1.0
+let mut t_flower: f32 = 1.0
+# Brightness for the current plant: 1 on the map (the frame's tint lights
+# it), the sunlight where it stands on the planet.
+let mut t_bright: f32 = 1.0
+# The planet view replaces the model's yaw with a full frame along the
+# surface normal, and has no fog.
+let mut use_basis: bool = false
+let mut ob_rx: f32 = 1.0
+let mut ob_ry: f32 = 0.0
+let mut ob_rz: f32 = 0.0
+let mut ob_ux: f32 = 0.0
+let mut ob_uy: f32 = 1.0
+let mut ob_uz: f32 = 0.0
+let mut ob_fx: f32 = 0.0
+let mut ob_fy: f32 = 0.0
+let mut ob_fz: f32 = 1.0
+
+# Stars: fixed directions on the sky, drawn at night through the tint.
+const N_STARS: i32 = 360
+let mut star_x: ptr<f32> = null
+let mut star_y: ptr<f32> = null
+let mut star_z: ptr<f32> = null
+let mut rain_frame: i32 = 0
+
+# Counters for the HUD.
+let mut st_plants: i32 = 0
+let mut st_segs: i32 = 0
+let mut st_leaves: i32 = 0
+let mut st_flowers: i32 = 0
+
+# ---------------------------------------------------------------- setup
+
+function view_init() -> bool {
+    if !r3d_init(RW, RH) { return false }
+    big = alloc_u8(WIN_W * WIN_H * 3)
+    vp = alloc_f32(16)
+    proj = alloc_f32(16)
+    view_m = alloc_f32(16)
+    ident = alloc_f32(16)
+    mvp = alloc_f32(16)
+    nc_x = alloc_f32(SCRATCH_NODES)
+    nc_y = alloc_f32(SCRATCH_NODES)
+    nc_z = alloc_f32(SCRATCH_NODES)
+    nc_w = alloc_f32(SCRATCH_NODES)
+    nc_stamp = alloc_i32(SCRATCH_NODES)
+    for i in 0 to SCRATCH_NODES { nc_stamp[i] = -1 }
+    grass_m = alloc_i32(N_GRASS_MODELS)
+    star_x = alloc_f32(N_STARS)
+    star_y = alloc_f32(N_STARS)
+    star_z = alloc_f32(N_STARS)
+    for i in 0 to N_STARS {
+        let a: f64 = 2.0 * PI * sym_jitter(i * 3 + 1)
+        let e: f64 = 0.05 + 0.95 * (0.5 + 0.5 * sym_jitter(i * 3 + 2))
+        let c: f64 = sqrt(1.0 - e * e)
+        star_x[i] = (cos(a) * c) as f32
+        star_y[i] = e as f32
+        star_z[i] = (sin(a) * c) as f32
+    }
+    m4_identity(ident)
+    m4_perspective(proj, r3d_radians(FOV_DEG), (RW as f32) / (RH as f32), NEAR, FAR)
+    foc = proj[5]
+    half_h = (RH as f32) * 0.5
+    r3d_set_ambient(0.42)
+    r3d_set_cull(R3D_CULL_NONE)
+    r3d_set_near(NEAR)
+    return true
+}
+
+# Grass models are built once per world and pinned so compaction keeps them.
+function build_grass_models() -> void {
+    for i in 0 to N_GRASS_MODELS {
+        let m: i32 = build_model(3, exp(0.06 * rng_gauss()), 1.0)
+        grass_m[i] = m
+        if m >= 0 { m_ref[m] = 1000000 }
+    }
+}
+
+# ---------------------------------------------------------------- ground
+
+# Grid spacing grows away from the walker: fine underfoot, coarse at the fog.
+function ground_off(u: f64) -> f64 {
+    let mut a: f64 = u
+    if a < 0.0 { a = -a }
+    return ((view_r + 20.0) as f64) * (0.12 * u + 0.88 * u * a)
+}
+
+function build_ground(cx: f64, cz: f64) -> void {
+    r3d_mesh_reset()
+    let n: i32 = GROUND_N
+    let ox: f64 = floor(cx / 4.0) * 4.0
+    let oz: f64 = floor(cz / 4.0) * 4.0
+    for gz in 0 to n + 1 {
+        let vz: f64 = (gz as f64) / (n as f64) * 2.0 - 1.0
+        let z: f64 = oz + ground_off(vz)
+        for gx in 0 to n + 1 {
+            let vx: f64 = (gx as f64) / (n as f64) * 2.0 - 1.0
+            let x: f64 = ox + ground_off(vx)
+            let y: f64 = surface_h(x, z)
+            let e: f64 = 1.5
+            let dhx: f64 = surface_h(x + e, z) - surface_h(x - e, z)
+            let dhz: f64 = surface_h(x, z + e) - surface_h(x, z - e)
+            let nrm: V3 = v3_norm(v3((0.0 - dhx) as f32, (2.0 * e) as f32, (0.0 - dhz) as f32))
+            ground_colour(x, z)
+            let v: i32 = r3d_mesh_vertex(v3(x as f32, y as f32, z as f32), nrm,
+                                         v3(gc_r as f32, gc_g as f32, gc_b as f32))
+        }
+    }
+    let row: i32 = n + 1
+    for gz in 0 to n {
+        for gx in 0 to n {
+            let i0: i32 = gz * row + gx
+            let ok1: bool = r3d_mesh_tri(i0, i0 + row, i0 + 1)
+            let ok2: bool = r3d_mesh_tri(i0 + 1, i0 + row, i0 + row + 1)
+        }
+    }
+}
+
+# ---------------------------------------------------------------- pixel helpers
+
+function fogged(r: f32, g: f32, b: f32, w: f32) -> V3 {
+    let mut t: f32 = (w - fog_near) / (fog_far - fog_near)
+    if t < 0.0 { t = 0.0 }
+    if t > 1.0 { t = 1.0 }
+    return v3(r + (fog_r - r) * t, g + (fog_g - g) * t, b + (fog_b - b) * t)
+}
+
+function sv(x: f32, y: f32, z: f32, iw: f32, c: V3) -> SVert {
+    return SVert { x: x, y: y, z: z, iw: iw, r: c.x, g: c.y, b: c.z }
+}
+
+function clip_to_sv(x: f32, y: f32, z: f32, w: f32, c: V3) -> SVert {
+    let iw: f32 = 1.0 / w
+    return SVert { x: (x * iw * 0.5 + 0.5) * (RW as f32), y: (0.5 - y * iw * 0.5) * (RH as f32),
+                   z: z * iw * 0.5 + 0.5, iw: iw, r: c.x, g: c.y, b: c.z }
+}
+
+# A depth-tested disc at a clip-space point, radius in metres.
+function disc3(x: f32, y: f32, z: f32, w: f32, rad_m: f32, r: f32, g: f32, b: f32) -> void {
+    if w < NEAR { return }
+    let iw: f32 = 1.0 / w
+    let sx: f32 = (x * iw * 0.5 + 0.5) * (RW as f32)
+    let sy: f32 = (0.5 - y * iw * 0.5) * (RH as f32)
+    let sz: f32 = z * iw * 0.5 + 0.5
+    let pr: f32 = rad_m * foc * half_h * iw
+    let c: V3 = fogged(r, g, b, w)
+    if pr < 0.7 {
+        r3d_put_depth(sx as i32, sy as i32, sz, c)
+        return
+    }
+    let ri: i32 = (pr + 0.5) as i32
+    let cx: i32 = sx as i32
+    let cy: i32 = sy as i32
+    if cx + ri < 0 or cx - ri >= RW or cy + ri < 0 or cy - ri >= RH { return }
+    let r2: f32 = pr * pr + 0.3
+    let cr: u8 = (r3d_clampf(c.x, 0.0, 1.0) * 255.0) as u8
+    let cg: u8 = (r3d_clampf(c.y, 0.0, 1.0) * 255.0) as u8
+    let cb: u8 = (r3d_clampf(c.z, 0.0, 1.0) * 255.0) as u8
+    let mut dy: i32 = 0 - ri
+    while dy <= ri {
+        let yy: i32 = cy + dy
+        if yy >= 0 and yy < RH {
+            let mut dx: i32 = 0 - ri
+            while dx <= ri {
+                let xx: i32 = cx + dx
+                if xx >= 0 and xx < RW {
+                    if ((dx * dx + dy * dy) as f32) <= r2 {
+                        let di: i32 = yy * RW + xx
+                        if sz < r3d_depth[di] {
+                            r3d_depth[di] = sz
+                            let o: i32 = di * 3
+                            r3d_color[o] = cr
+                            r3d_color[o + 1] = cg
+                            r3d_color[o + 2] = cb
+                        }
+                    }
+                }
+                dx = dx + 1
+            }
+        }
+        dy = dy + 1
+    }
+}
+
+# A shaded quad between two clip-space points, radius in metres.
+function quad_clip(ax0: f32, ay0: f32, az0: f32, wa: f32, bx0: f32, by0: f32, bz0: f32,
+                   wb: f32, rad: f32, cr: f32, cg: f32, cb: f32) -> void {
+    if wa < NEAR or wb < NEAR { return }
+    let ia: f32 = 1.0 / wa
+    let ib: f32 = 1.0 / wb
+    let ax: f32 = (ax0 * ia * 0.5 + 0.5) * (RW as f32)
+    let ay: f32 = (0.5 - ay0 * ia * 0.5) * (RH as f32)
+    let az: f32 = az0 * ia * 0.5 + 0.5
+    let bx: f32 = (bx0 * ib * 0.5 + 0.5) * (RW as f32)
+    let by: f32 = (0.5 - by0 * ib * 0.5) * (RH as f32)
+    let bz: f32 = bz0 * ib * 0.5 + 0.5
+    if (ax < -40.0 and bx < -40.0) or (ax > (RW as f32) + 40.0 and bx > (RW as f32) + 40.0) { return }
+    if (ay < -40.0 and by < -40.0) or (ay > (RH as f32) + 40.0 and by > (RH as f32) + 40.0) { return }
+    let pa: f32 = rad * foc * half_h * ia
+    let pb: f32 = rad * foc * half_h * ib
+    st_segs = st_segs + 1
+    let ddx: f32 = bx - ax
+    let ddy: f32 = by - ay
+    if pa < 0.6 and pb < 0.6 and ddx * ddx + ddy * ddy < 2.0 {
+        # Shorter than a pixel or so: one pixel says as much.
+        r3d_put_depth(bx as i32, by as i32, bz, fogged(cr * 0.85, cg * 0.85, cb * 0.85, wb))
+        return
+    }
+    if pa < 0.6 and pb < 0.6 {
+        r3d_line_depth(ax as i32, ay as i32, az, bx as i32, by as i32, bz,
+                       fogged(cr * 0.85, cg * 0.85, cb * 0.85, wa))
+        return
+    }
+    let dx: f32 = bx - ax
+    let dy: f32 = by - ay
+    let len: f32 = sqrtf(dx * dx + dy * dy)
+    let mut nx: f32 = 1.0
+    let mut ny: f32 = 0.0
+    if len > 0.001 {
+        nx = 0.0 - dy / len
+        ny = dx / len
+    }
+    # The sun sits to the upper left of most views: that edge is lit.
+    if nx * (-0.6) + ny * (-0.8) < 0.0 {
+        nx = 0.0 - nx
+        ny = 0.0 - ny
+    }
+    let ca: V3 = fogged(cr * 1.12, cg * 1.12, cb * 1.12, wa)
+    let cd: V3 = fogged(cr * 0.62, cg * 0.62, cb * 0.62, wa)
+    let cbl: V3 = fogged(cr * 1.12, cg * 1.12, cb * 1.12, wb)
+    let cbd: V3 = fogged(cr * 0.62, cg * 0.62, cb * 0.62, wb)
+    let a1: SVert = sv(ax + nx * pa, ay + ny * pa, az, ia, ca)
+    let a2: SVert = sv(ax - nx * pa, ay - ny * pa, az, ia, cd)
+    let b1: SVert = sv(bx + nx * pb, by + ny * pb, bz, ib, cbl)
+    let b2: SVert = sv(bx - nx * pb, by - ny * pb, bz, ib, cbd)
+    r3d_raster_tri(a1, a2, b2)
+    r3d_raster_tri(a1, b2, b1)
+}
+
+function stem_rgb(col: i32) -> V3 {
+    let r: f32 = (col_r(col) as f32) / 255.0 * t_bright
+    let g: f32 = (col_g(col) as f32) / 255.0 * t_bright
+    let b: f32 = (col_b(col) as f32) / 255.0 * t_bright
+    return v3(r + (t_stem_r - r) * t_stem, g + (t_stem_g - g) * t_stem, b + (t_stem_b - b) * t_stem)
+}
+
+function leaf_rgb(col: i32) -> V3 {
+    let r: f32 = (col_r(col) as f32) / 255.0 * t_bright
+    let g: f32 = (col_g(col) as f32) / 255.0 * t_bright
+    let b: f32 = (col_b(col) as f32) / 255.0 * t_bright
+    return v3(r + (t_leaf_r - r) * t_leaf, g + (t_leaf_g - g) * t_leaf, b + (t_leaf_b - b) * t_leaf)
+}
+
+# ---------------------------------------------------------------- per plant
+
+# mvp = vp * translate(P) * rotate_y(yaw) * scale(s), written out. On the
+# planet the model's axes are the basis ob_r, ob_u, ob_f instead.
+function build_mvp(px: f32, py: f32, pz: f32, cyaw: f32, syaw: f32, s: f32) -> void {
+    if use_basis {
+        for r in 0 to 4 {
+            let o: i32 = r * 4
+            let a: f32 = vp[o]
+            let b: f32 = vp[o + 1]
+            let cc: f32 = vp[o + 2]
+            let d: f32 = vp[o + 3]
+            mvp[o] = (a * ob_rx + b * ob_ry + cc * ob_rz) * s
+            mvp[o + 1] = (a * ob_ux + b * ob_uy + cc * ob_uz) * s
+            mvp[o + 2] = (a * ob_fx + b * ob_fy + cc * ob_fz) * s
+            mvp[o + 3] = a * px + b * py + cc * pz + d
+        }
+        return
+    }
+    let c: f32 = cyaw * s
+    let sn: f32 = syaw * s
+    for r in 0 to 4 {
+        let o: i32 = r * 4
+        let a: f32 = vp[o]
+        let b: f32 = vp[o + 1]
+        let cc: f32 = vp[o + 2]
+        let d: f32 = vp[o + 3]
+        # Model columns: x -> (c, 0, -sn), y -> (0, s, 0), z -> (sn, 0, c).
+        mvp[o] = a * c - cc * sn
+        mvp[o + 1] = b * s
+        mvp[o + 2] = a * sn + cc * c
+        mvp[o + 3] = a * px + b * py + cc * pz + d
+    }
+}
+
+# Offsets in model space carried to clip space by mvp's linear part.
+let mut oc_x: f32 = 0.0
+let mut oc_y: f32 = 0.0
+let mut oc_z: f32 = 0.0
+let mut oc_w: f32 = 0.0
+
+function off_clip(ox: f32, oy: f32, oz: f32) -> void {
+    oc_x = mvp[0] * ox + mvp[1] * oy + mvp[2] * oz
+    oc_y = mvp[4] * ox + mvp[5] * oy + mvp[6] * oz
+    oc_z = mvp[8] * ox + mvp[9] * oy + mvp[10] * oz
+    oc_w = mvp[12] * ox + mvp[13] * oy + mvp[14] * oz
+}
+
+function seg_quad(a: i32, b: i32, rad: f32, col: i32) -> void {
+    let c: V3 = stem_rgb(col)
+    quad_clip(nc_x[a], nc_y[a], nc_z[a], nc_w[a], nc_x[b], nc_y[b], nc_z[b], nc_w[b],
+              rad, c.x, c.y, c.z)
+}
+
+# A leaf as a kite: base, two shoulders at 40% of its length, and the tip.
+# A one-pixel leaf stroke, without lighting: at this size the blade's
+# angle to the sun cannot be seen, only its colour and direction.
+function leaf_stroke(o: i32, node: i32) -> void {
+    let w0: f32 = nc_w[node]
+    if w0 < NEAR { return }
+    let len: f32 = or_s[o]
+    off_clip(or_dx[o] * len, (or_dy[o] - 0.25) * len, or_dz[o] * len)
+    let tw: f32 = w0 + oc_w
+    if tw < NEAR { return }
+    let c: i32 = or_c[o]
+    let r: f32 = (col_r(c) as f32) / 255.0
+    let g: f32 = (col_g(c) as f32) / 255.0
+    let b: f32 = (col_b(c) as f32) / 255.0
+    let k: f32 = 0.85 * (1.0 - leaf_fog) * t_bright
+    let fr: f32 = (r + (t_leaf_r - r) * t_leaf) * k + fog_r * leaf_fog
+    let fg: f32 = (g + (t_leaf_g - g) * t_leaf) * k + fog_g * leaf_fog
+    let fb: f32 = (b + (t_leaf_b - b) * t_leaf) * k + fog_b * leaf_fog
+    let ib: f32 = 1.0 / w0
+    let it: f32 = 1.0 / tw
+    st_leaves = st_leaves + 1
+    r3d_line_depth(((nc_x[node] * ib * 0.5 + 0.5) * (RW as f32)) as i32,
+                   ((0.5 - nc_y[node] * ib * 0.5) * (RH as f32)) as i32,
+                   nc_z[node] * ib * 0.5 + 0.5,
+                   (((nc_x[node] + oc_x) * it * 0.5 + 0.5) * (RW as f32)) as i32,
+                   ((0.5 - (nc_y[node] + oc_y) * it * 0.5) * (RH as f32)) as i32,
+                   (nc_z[node] + oc_z) * it * 0.5 + 0.5, v3(fr, fg, fb))
+}
+
+# Fog for the whole plant, so leaf strokes need not compute it each.
+let mut leaf_fog: f32 = 0.0
+
+function draw_leaf(o: i32, node: i32, s: f32, lmx: f32, lmy: f32, lmz: f32, leafw: f32,
+                   reduced: bool) -> void {
+    if reduced {
+        leaf_stroke(o, node)
+        return
+    }
+    let w0: f32 = nc_w[node]
+    if w0 < NEAR { return }
+    let len: f32 = or_s[o]
+    let mut dx: f32 = or_dx[o]
+    let mut dy: f32 = or_dy[o] - 0.25
+    let mut dz: f32 = or_dz[o]
+    let dl: f32 = sqrtf(dx * dx + dy * dy + dz * dz)
+    dx = dx / dl
+    dy = dy / dl
+    dz = dz / dl
+    let sx: f32 = or_sx[o]
+    let sy: f32 = or_sy[o]
+    let sz: f32 = or_sz[o]
+    # Light on both faces of the blade.
+    let nx: f32 = dy * sz - dz * sy
+    let ny: f32 = dz * sx - dx * sz
+    let nz: f32 = dx * sy - dy * sx
+    let mut ld: f32 = nx * lmx + ny * lmy + nz * lmz
+    if ld < 0.0 { ld = 0.0 - ld }
+    let k: f32 = 0.5 + 0.62 * ld
+    let lc: V3 = leaf_rgb(or_c[o])
+    let cr: f32 = lc.x * k
+    let cg: f32 = lc.y * k
+    let cb: f32 = lc.z * k
+    let px_len: f32 = len * s * foc * half_h / w0
+    st_leaves = st_leaves + 1
+    if px_len < 2.5 or reduced {
+        # A small leaf is a one-pixel stroke from its base along its heading.
+        off_clip(dx * len, dy * len, dz * len)
+        let tw0: f32 = w0 + oc_w
+        if tw0 < NEAR { return }
+        let ib: f32 = 1.0 / w0
+        let it: f32 = 1.0 / tw0
+        r3d_line_depth(((nc_x[node] * ib * 0.5 + 0.5) * (RW as f32)) as i32,
+                       ((0.5 - nc_y[node] * ib * 0.5) * (RH as f32)) as i32,
+                       nc_z[node] * ib * 0.5 + 0.5,
+                       (((nc_x[node] + oc_x) * it * 0.5 + 0.5) * (RW as f32)) as i32,
+                       ((0.5 - (nc_y[node] + oc_y) * it * 0.5) * (RH as f32)) as i32,
+                       (nc_z[node] + oc_z) * it * 0.5 + 0.5,
+                       fogged(cr, cg, cb, w0))
+        return
+    }
+    let half: f32 = len * leafw * 0.5
+    let bx: f32 = nc_x[node]
+    let by: f32 = nc_y[node]
+    let bz: f32 = nc_z[node]
+    off_clip(dx * len, dy * len, dz * len)
+    let tx: f32 = bx + oc_x
+    let ty: f32 = by + oc_y
+    let tz: f32 = bz + oc_z
+    let tw: f32 = w0 + oc_w
+    off_clip(dx * len * 0.4 + sx * half, dy * len * 0.4 + sy * half, dz * len * 0.4 + sz * half)
+    let lx: f32 = bx + oc_x
+    let ly: f32 = by + oc_y
+    let lz: f32 = bz + oc_z
+    let lw: f32 = w0 + oc_w
+    off_clip(dx * len * 0.4 - sx * half, dy * len * 0.4 - sy * half, dz * len * 0.4 - sz * half)
+    let rx: f32 = bx + oc_x
+    let ry: f32 = by + oc_y
+    let rz: f32 = bz + oc_z
+    let rw: f32 = w0 + oc_w
+    if tw < NEAR or lw < NEAR or rw < NEAR { return }
+    let cbase: V3 = fogged(cr * 0.8, cg * 0.8, cb * 0.8, w0)
+    let cmid: V3 = fogged(cr, cg, cb, lw)
+    let ctip: V3 = fogged(cr * 1.1, cg * 1.1, cb * 1.05, tw)
+    let vb: SVert = clip_to_sv(bx, by, bz, w0, cbase)
+    let vl: SVert = clip_to_sv(lx, ly, lz, lw, cmid)
+    let vr: SVert = clip_to_sv(rx, ry, rz, rw, cmid)
+    let vt: SVert = clip_to_sv(tx, ty, tz, tw, ctip)
+    r3d_raster_tri(vb, vl, vt)
+    r3d_raster_tri(vb, vt, vr)
+}
+
+# A disc at node + offset (model space), radius in model metres.
+function petal(node: i32, ox: f32, oy: f32, oz: f32, rad: f32, s: f32, c: i32, k: f32) -> void {
+    off_clip(ox, oy, oz)
+    let kb: f32 = k * t_bright
+    disc3(nc_x[node] + oc_x, nc_y[node] + oc_y, nc_z[node] + oc_z, nc_w[node] + oc_w,
+          rad * s, (col_r(c) as f32) / 255.0 * kb, (col_g(c) as f32) / 255.0 * kb,
+          (col_b(c) as f32) / 255.0 * kb)
+}
+
+function rgb(r: i32, g: i32, b: i32) -> i32 {
+    return (r << 16) | (g << 8) | b
+}
+
+# A ring of n discs around the apex, in the plane across the heading.
+function petal_ring(node: i32, n: i32, rr: f32, prad: f32, lift: f32, spin: f32, s: f32,
+                    dx: f32, dy: f32, dz: f32, ax: f32, ay: f32, az: f32,
+                    bx: f32, by: f32, bz: f32, c: i32, k: f32) -> void {
+    for i in 0 to n {
+        let a: f32 = spin + 6.2831853 * (i as f32) / (n as f32)
+        let ca: f32 = cosf(a) * rr
+        let sa: f32 = sinf(a) * rr
+        petal(node, dx * lift + ax * ca + bx * sa, dy * lift + ay * ca + by * sa,
+              dz * lift + az * ca + bz * sa, prad, s, c, k)
+    }
+}
+
+function draw_flower(o: i32, node: i32, s0: f32, fcol: i32) -> void {
+    if nc_w[node] < NEAR { return }
+    let kind: i32 = or_k[o]
+    let s: f32 = s0 * (0.35 + 0.65 * t_flower)
+    let u: f32 = or_s[o]
+    let j: f32 = or_j[o]
+    let mut c: i32 = or_c[o]
+    if c < 0 { c = fcol }
+    let dx: f32 = or_dx[o]
+    let dy: f32 = or_dy[o]
+    let dz: f32 = or_dz[o]
+    let ax: f32 = or_sx[o]
+    let ay: f32 = or_sy[o]
+    let az: f32 = or_sz[o]
+    # b = d x a completes the flower's frame.
+    let bx: f32 = dy * az - dz * ay
+    let by: f32 = dz * ax - dx * az
+    let bz: f32 = dx * ay - dy * ax
+    st_flowers = st_flowers + 1
+    let px: f32 = u * 8.0 * s * foc * half_h / nc_w[node]
+    if px < 1.2 {
+        petal(node, 0.0, 0.0, 0.0, u * 4.0, s, c, 1.0)
+        return
+    }
+    if kind == ORN_BERRY {
+        petal(node, 0.0, 0.0, 0.0, u, s, c, 1.0)
+        return
+    }
+    if kind == ORN_ROSE {
+        petal_ring(node, 5, u, u * 0.8, 0.0, j * 3.0, s, dx, dy, dz, ax, ay, az, bx, by, bz, c, 1.0)
+        petal(node, dx * u * 0.4, dy * u * 0.4, dz * u * 0.4, u * 0.75, s, c, 0.75)
+        return
+    }
+    if kind == ORN_BELL {
+        petal(node, dx * u * 0.9, dy * u * 0.9 - u * 0.5, dz * u * 0.9, u * 0.75, s, c, 1.0)
+        petal(node, dx * u * 1.1, dy * u * 1.1 - u * 0.9, dz * u * 1.1, u * 0.45, s, c, 0.6)
+        return
+    }
+    let style: i32 = kind - ORN_BLOOM
+    if style == END_DAISY {
+        petal_ring(node, 9, u * 3.6, u * 1.9, 0.0, j * 3.0, s, dx, dy, dz, ax, ay, az, bx, by, bz, c, 1.0)
+        petal(node, dx * u * 0.8, dy * u * 0.8, dz * u * 0.8, u * 2.0, s, rgb(246, 200, 60), 1.0)
+        return
+    }
+    if style == END_TULIP {
+        petal(node, dx * u * 5.5, dy * u * 5.5, dz * u * 5.5, u * 5.6, s, c, 1.0)
+        petal(node, dx * u * 8.5 + ax * u * 3.2, dy * u * 8.5 + ay * u * 3.2,
+              dz * u * 8.5 + az * u * 3.2, u * 3.4, s, c, 1.05)
+        petal(node, dx * u * 8.5 - ax * u * 3.2, dy * u * 8.5 - ay * u * 3.2,
+              dz * u * 8.5 - az * u * 3.2, u * 3.4, s, c, 1.05)
+        petal(node, dx * u * 9.0 + bx * u * 2.0, dy * u * 9.0 + by * u * 2.0,
+              dz * u * 9.0 + bz * u * 2.0, u * 3.0, s, c, 0.8)
+        return
+    }
+    if style == END_SPIKE {
+        for i in 0 to 9 {
+            let t: f32 = (i as f32) * 2.3 * u
+            let sd: f32 = 1.5 * u * (((i % 2) * 2 - 1) as f32)
+            petal(node, dx * t + ax * sd, dy * t + ay * sd, dz * t + az * sd,
+                  1.9 * u * (1.0 - (i as f32) * 0.07), s, c, 1.0 - (i as f32) * 0.03)
+        }
+        return
+    }
+    if style == END_PUFF {
+        petal(node, 0.0, 0.0, 0.0, u * 2.2, s, rgb(150, 150, 120), 1.0)
+        for i in 0 to 14 {
+            let a: f32 = j * 3.0 + 2.39996 * (i as f32)
+            let zz: f32 = 1.0 - 2.0 * ((i as f32) + 0.5) / 14.0
+            let rr: f32 = sqrtf(1.0 - zz * zz)
+            petal(node, cosf(a) * rr * u * 6.0, zz * u * 6.0, sinf(a) * rr * u * 6.0,
+                  u * 1.3, s, c, 1.0)
+        }
+        return
+    }
+    if style == END_SUN {
+        # Sunflowers turn their heads out toward the light.
+        let fx: f32 = dx * 0.3 + bx * 0.95
+        let fy: f32 = dy * 0.3 + by * 0.95
+        let fz: f32 = dz * 0.3 + bz * 0.95
+        petal_ring(node, 16, u * 9.5, u * 3.4, 0.0, j, s, fx, fy, fz, ax, ay, az, dx, dy, dz, c, 1.0)
+        petal_ring(node, 16, u * 7.6, u * 2.8, 0.2, j + 0.2, s, fx, fy, fz, ax, ay, az, dx, dy, dz, c, 0.85)
+        petal(node, fx * u * 1.2, fy * u * 1.2, fz * u * 1.2, u * 6.6, s, rgb(92, 58, 30), 1.0)
+        return
+    }
+    if style == END_CATTAIL {
+        for i in 0 to 6 {
+            let t: f32 = (i as f32) * 2.2 * u
+            petal(node, dx * t, dy * t, dz * t, u * 2.4, s, c, 1.0)
+        }
+        petal(node, dx * u * 15.0, dy * u * 15.0, dz * u * 15.0, u * 0.6, s, rgb(120, 140, 90), 1.0)
+        return
+    }
+    if style == END_BUD {
+        petal(node, dx * u * 2.0, dy * u * 2.0, dz * u * 2.0, u * 2.0, s, c, 1.0)
+        return
+    }
+}
+
+# Draw model m at a place. frac is the share of segments grown.
+function draw_model(m: i32, px: f32, py: f32, pz: f32, cyaw: f32, syaw: f32, s: f32,
+                    frac: f32, fcol: i32, ph: f32) -> void {
+    let sp: i32 = m_sp[m]
+    let h: f32 = m_h[m] * s
+    build_mvp(px, py, pz, cyaw, syaw, s)
+    let mut lf: f32 = (mvp[15] - fog_near) / (fog_far - fog_near)
+    if lf < 0.0 { lf = 0.0 }
+    if lf > 1.0 { lf = 1.0 }
+    leaf_fog = lf
+
+    # Wind: a sway along +x with a little +z, in clip space.
+    let flex: f32 = sp_flex[sp] as f32
+    let sway: f32 = ((wind_amp() * wind_wave(px as f64)) as f32) * flex * 0.014 * h
+    let wx: f32 = sway
+    let wz: f32 = sway * 0.3
+    wd_x = vp[0] * wx + vp[2] * wz
+    wd_y = vp[4] * wx + vp[6] * wz
+    wd_z = vp[8] * wx + vp[10] * wz
+    wd_w = vp[12] * wx + vp[14] * wz
+
+    # Transform the nodes the revealed segments use.
+    let n0: i32 = m_node0[m]
+    let s0: i32 = m_seg0[m]
+    let mut nseg: i32 = (frac * ((m_nseg[m] + 1) as f32)) as i32
+    if nseg > m_nseg[m] { nseg = m_nseg[m] }
+    let mut nn: i32 = 1
+    if nseg > 0 { nn = sg_b[s0 + nseg - 1] - n0 + 1 }
+    if nn > SCRATCH_NODES { nn = SCRATCH_NODES }
+    draw_id = draw_id + 1
+    cur_n0 = n0
+    let lazy: bool = ph < 60.0
+    if !lazy {
+        for i in 0 to nn { need(i) }
+    }
+
+    # Smaller on screen, lower resolution: one-pixel leaves, and branch
+    # orders too fine to see are skipped. Under 70 pixels tall the model's
+    # low-detail lists are walked instead of the whole string.
+    let reduced: bool = ph < 60.0
+    let lmx: f32 = sun_x * cyaw - sun_z * syaw
+    let lmy: f32 = sun_y
+    let lmz: f32 = sun_x * syaw + sun_z * cyaw
+    let leafw: f32 = sp_leafw[sp] as f32
+    let o0: i32 = m_orn0[m]
+    let no: i32 = m_norn[m]
+    let dens_cut: i32 = (t_dens * 1000.0) as i32
+
+    if ph < 70.0 {
+        let mut l0: i32 = m_lod0[m]
+        let mut ln: i32 = m_l3[m]
+        if ph >= 30.0 {
+            l0 = l0 + m_l3[m]
+            ln = m_l5[m]
+        }
+        # A small herb far off shows only its flowers.
+        let woody_far: bool = h > 1.2
+        if !woody_far and ph < 16.0 { ln = 0 }
+        for t in 0 to ln {
+            let i: i32 = lod[l0 + t]
+            if i >= nseg { break }
+            let q: i32 = s0 + i
+            let a: i32 = sg_a[q] - n0
+            let b: i32 = sg_b[q] - n0
+            need(a)
+            need(b)
+            seg_quad(a, b, sg_r[q] * s, sg_c[q])
+        }
+        let lo0: i32 = m_lod0[m] + m_l3[m] + m_l5[m]
+        let mut step: i32 = 1
+        if ph < 12.0 { step = 2 }
+        let mut t: i32 = 0
+        while t < m_lo[m] {
+            let o: i32 = o0 + lod[lo0 + t]
+            if or_o[o] > nseg { break }
+            let node: i32 = or_n[o] - n0
+            if node < nn {
+                need(node)
+                if or_k[o] == ORN_LEAF {
+                    if ln > 0 and (t * 7919) % 1000 < dens_cut {
+                        draw_leaf(o, node, s, lmx, lmy, lmz, leafw, true)
+                    }
+                } else {
+                    if t_flower > 0.02 { draw_flower(o, node, s, fcol) }
+                }
+            }
+            t = t + step
+        }
+        return
+    }
+
+    for i in 0 to nseg {
+        let q: i32 = s0 + i
+        let a: i32 = sg_a[q] - n0
+        let b: i32 = sg_b[q] - n0
+        if lazy {
+            need(a)
+            need(b)
+        }
+        seg_quad(a, b, sg_r[q] * s, sg_c[q])
+    }
+    let mut stride: i32 = 1
+    if reduced { stride = 2 }
+    let mut i: i32 = 0
+    while i < no {
+        let o: i32 = o0 + i
+        if or_o[o] > nseg { break }
+        let node: i32 = or_n[o] - n0
+        if node < nn {
+            if lazy { need(node) }
+            if or_k[o] == ORN_LEAF {
+                if (i * 7919) % 1000 < dens_cut {
+                    draw_leaf(o, node, s, lmx, lmy, lmz, leafw, reduced)
+                }
+            } else {
+                if t_flower > 0.02 { draw_flower(o, node, s, fcol) }
+            }
+        }
+        i = i + stride
+    }
+}
+
+# Tint for plant k from its stage and the season.
+function set_tint(k: i32) -> void {
+    let sp: i32 = in_sp[k]
+    let st: i32 = in_stage[k]
+    let d: f64 = doy()
+    t_stem = 0.0
+    t_leaf = 0.0
+    t_dens = 1.0
+    t_flower = 0.0
+    t_stem_r = 0.42
+    t_stem_g = 0.38
+    t_stem_b = 0.33
+    let kind: i32 = lf_kind[sp]
+    # The season as this plant feels it, where it stands: a tropical
+    # deciduous tree keeps its leaves, a northern one is bare for months.
+    let t_now: f64 = (in_tb[k] as f64) + season_warmth()
+    let cooling: bool = d >= 36.0 and d < 84.0
+    if lf_decid[sp] == 1 {
+        let ac: i32 = lf_autumn[sp]
+        let mut a: f64 = 0.0
+        if cooling { a = 1.0 - ramp(t_now, 0.36, 0.48) }
+        t_leaf = a as f32
+        t_leaf_r = (col_r(ac) as f32) / 255.0
+        t_leaf_g = (col_g(ac) as f32) / 255.0
+        t_leaf_b = (col_b(ac) as f32) / 255.0
+        t_dens = ramp(t_now, 0.28, 0.40) as f32
+        if !cooling and t_now < 0.48 {
+            # Spring leaves come out pale.
+            t_leaf = (0.5 * (1.0 - ramp(t_now, 0.36, 0.48))) as f32
+            t_leaf_r = 0.62
+            t_leaf_g = 0.82
+            t_leaf_b = 0.40
+        }
+    }
+    if kind == K_HERB or kind == K_ANNUAL {
+        # Herbs brown as it cools and stand as straw through the cold.
+        let straw: f64 = 1.0 - ramp(warmth_ok(sp, t_now), 0.0, 0.6)
+        t_leaf = straw as f32
+        t_leaf_r = 0.66
+        t_leaf_g = 0.58
+        t_leaf_b = 0.36
+        t_stem = (straw * 0.8) as f32
+        t_stem_r = 0.62
+        t_stem_g = 0.55
+        t_stem_b = 0.36
+        if straw > 0.8 { t_dens = 0.3 }
+    }
+    if st == ST_ADULT {
+        let a: f64 = lf_fl0[sp]
+        let b: f64 = lf_fl1[sp]
+        if in_window(d, a, b) {
+            let mut into: f64 = d - a
+            if into < 0.0 { into = into + YEAR }
+            let mut left: f64 = b - d
+            if left < 0.0 { left = left + YEAR }
+            let mut f: f64 = ramp(into, 0.0, 3.0)
+            let g: f64 = ramp(left, 0.0, 3.0)
+            if g < f { f = g }
+            t_flower = f as f32
+        }
+        # Berries hang on into autumn; cattail heads stand all year.
+        if sp_tip[sp] == TIP_BERRY and in_window(d, a, 76.0) { t_flower = 1.0 }
+        if sp_end[sp] == END_CATTAIL { t_flower = 1.0 }
+    }
+    if st == ST_WITHER {
+        let p: f32 = (in_st[k] / 10.0) as f32
+        t_leaf = 0.3 + 0.7 * p
+        t_leaf_r = 0.50
+        t_leaf_g = 0.36
+        t_leaf_b = 0.20
+        t_stem = 0.5 * p
+        t_dens = t_dens * (1.0 - 0.7 * p)
+    }
+    if st == ST_DEAD {
+        t_dens = 0.0
+        t_stem = 0.8
+        t_stem_r = 0.46
+        t_stem_g = 0.42
+        t_stem_b = 0.38
+    }
+}
+
+function draw_plant(k: i32) -> void {
+    let m: i32 = in_m[k]
+    if m < 0 or in_frac[k] <= 0.0 { return }
+    let sp: i32 = m_sp[m]
+    let s: f32 = in_s[k]
+    let h: f32 = m_h[m] * s
+    let rx: f32 = in_x[k] - cam_x
+    let rz: f32 = in_z[k] - cam_z
+    let dist: f32 = sqrtf(rx * rx + rz * rz)
+    let rad: f32 = m_r[m] * s + h * 0.3 + 0.5
+    let ahead: f32 = rx * cam_fx + rz * cam_fz
+    if ahead < 0.0 - rad - cull_slack { return }
+    let side: f32 = rx * (0.0 - cam_fz) + rz * cam_fx
+    let mut aside: f32 = side
+    if aside < 0.0 { aside = 0.0 - aside }
+    if aside - rad > ahead * 0.92 + 1.0 + cull_slack { return }
+    let ph: f32 = h * foc * half_h / (dist + 0.5)
+    if ph < 1.2 { return }
+    set_tint(k)
+    let woody: bool = lf_kind[sp] == K_WOODY and h > 1.2
+    if ph < 3.0 and !woody and t_flower < 0.3 { return }
+    st_plants = st_plants + 1
+    draw_model(m, in_x[k], in_y[k], in_z[k], in_cy[k], in_sy[k], s, in_frac[k], in_flower[k], ph)
+}
+
+# Grass tufts near the walker, one per cell where the ground is green.
+function draw_grass() -> void {
+    let straw: f64 = autumn_amount() * 0.6 + snow_amount() * 0.4
+    t_stem = straw as f32
+    t_stem_r = 0.70
+    t_stem_g = 0.64
+    t_stem_b = 0.40
+    t_leaf = 0.0
+    t_dens = 1.0
+    t_flower = 0.0
+    let snow: f64 = snow_amount()
+    let r: i32 = (GRASS_DIST / GRASS_CELL) as i32
+    let cx: i32 = floor((cam_x as f64) / GRASS_CELL) as i32
+    let cz: i32 = floor((cam_z as f64) / GRASS_CELL) as i32
+    for gz in cz - r to cz + r + 1 {
+        for gx in cx - r to cx + r + 1 {
+            let h: u32 = ((gx * 73856093) ^ (gz * 19349663)) as u32 * 2654435761
+            let j1: f64 = (((h >> 8) % 1000) as f64) / 1000.0
+            let j2: f64 = (((h >> 18) % 1000) as f64) / 1000.0
+            let x: f64 = ((gx as f64) + j1) * GRASS_CELL
+            let z: f64 = ((gz as f64) + j2) * GRASS_CELL
+            let rx: f64 = x - (cam_x as f64)
+            let rz: f64 = z - (cam_z as f64)
+            let dist2: f64 = rx * rx + rz * rz
+            if dist2 < GRASS_DIST * GRASS_DIST {
+                let ahead: f64 = rx * (cam_fx as f64) + rz * (cam_fz as f64)
+                if ahead > -1.0 {
+                    let e: f64 = ground_h(x, z)
+                    let m: f64 = moisture(x, z)
+                    let keep: f64 = (0.25 + 0.7 * m) * ramp(e, 0.4, 1.2) * (1.0 - ramp(e, 30.0, 40.0))
+                                    * (1.0 - snow * 0.85)
+                    if (((h >> 4) % 1000) as f64) / 1000.0 < keep {
+                        let gm: i32 = grass_m[((h >> 12) % (N_GRASS_MODELS as u32)) as i32]
+                        if gm >= 0 {
+                            let yaw: f64 = j1 * 6.283
+                            let s: f64 = 0.7 + 0.7 * j2
+                            let ph: f32 = (((m_h[gm] as f64) * s) as f32) * foc * half_h
+                                          / ((sqrt(dist2) + 0.5) as f32)
+                            if ph > 2.0 {
+                                draw_model(gm, x as f32, e as f32, z as f32, cos(yaw) as f32,
+                                           sin(yaw) as f32, s as f32, 1.0, 0, 200.0)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+# ---------------------------------------------------------------- frame
+
+function view_set_camera(x: f32, y: f32, z: f32, yaw: f32, pitch: f32) -> void {
+    cam_x = x
+    cam_y = y
+    cam_z = z
+    let f: V3 = r3d_forward(yaw, pitch)
+    let fl: f32 = sqrtf(f.x * f.x + f.z * f.z)
+    cam_fx = f.x / fl
+    cam_fz = f.z / fl
+    let eye: V3 = v3(x, y, z)
+    m4_look_at(view_m, eye, v3_add(eye, f), v3(0.0, 1.0, 0.0))
+    m4_mul(vp, proj[0..16], view_m[0..16])
+}
+
+function view_render() -> void {
+    st_plants = 0
+    st_segs = 0
+    st_leaves = 0
+    st_flowers = 0
+    # Sky and fog in day_light terms: golden, greyed by cloud and winter,
+    # orange near the horizon at dawn and dusk. post_light() then tints the
+    # whole frame for the hour, so the night sky is dark with the rest.
+    let w: f32 = snow_amount() as f32
+    let cl: f32 = cloud as f32
+    let du: f32 = dusk as f32
+    let mut tr: f32 = 0.30 + 0.22 * w
+    let mut tg: f32 = 0.46 + 0.14 * w
+    let mut tb: f32 = 0.72
+    fog_r = 0.92 - 0.06 * w
+    fog_g = 0.82 + 0.04 * w
+    fog_b = 0.68 + 0.18 * w
+    tr = tr + (0.52 - tr) * cl
+    tg = tg + (0.56 - tg) * cl
+    tb = tb + (0.62 - tb) * cl
+    fog_r = fog_r + (0.70 - fog_r) * cl
+    fog_g = fog_g + (0.72 - fog_g) * cl
+    fog_b = fog_b + (0.75 - fog_b) * cl
+    fog_r = fog_r + (1.0 - fog_r) * du * 0.6
+    fog_g = fog_g + (0.58 - fog_g) * du * 0.6
+    fog_b = fog_b + (0.40 - fog_b) * du * 0.6
+    tr = tr + (0.38 - tr) * du * 0.4
+    tb = tb + (0.60 - tb) * du * 0.4
+    let top: V3 = v3(tr, tg, tb)
+    # Light from the sun by day, from the moon opposite it by night.
+    if sun_dy > -0.05 {
+        sun_x = sun_dx as f32
+        sun_y = sun_dy as f32
+        sun_z = sun_dz as f32
+    } else {
+        sun_x = (0.0 - sun_dx) as f32
+        sun_y = (0.0 - sun_dy) as f32
+        sun_z = (0.0 - sun_dz) as f32
+    }
+    if sun_y < 0.15 { sun_y = 0.15 }
+    let lift: f64 = (cam_y as f64) - surface_h(cam_x as f64, cam_z as f64)
+    cull_slack = (lift * 1.2) as f32
+    view_r = RENDER_DIST + lift * 2.6
+    if view_r > 560.0 { view_r = 560.0 }
+    fog_near = (RENDER_DIST * 0.3 + lift * 2.0) as f32
+    fog_far = view_r as f32
+    fog_near = fog_near * ((1.0 - 0.6 * rain) as f32)
+    fog_far = fog_far * ((1.0 - 0.4 * rain) as f32)
+    r3d_set_fog(true, v3(fog_r, fog_g, fog_b), fog_near, fog_far)
+    r3d_clear_gradient(top, v3(fog_r, fog_g, fog_b))
+    # The sun, where the hour puts it, dimmed by cloud.
+    if sun_dy > -0.06 and cloud < 0.9 {
+        let sx: f32 = cam_x + (sun_dx as f32) * 300.0
+        let sy: f32 = cam_y + (sun_dy as f32) * 300.0
+        let sz: f32 = cam_z + (sun_dz as f32) * 300.0
+        let q: V3 = m4_point(vp[0..16], v3(sx, sy, sz))
+        let ww: f32 = m4_pointw(vp[0..16], v3(sx, sy, sz))
+        if ww > 1.0 {
+            sun_glow((q.x / ww * 0.5 + 0.5) * (RW as f32), (0.5 - q.y / ww * 0.5) * (RH as f32),
+                     (1.0 - cloud) as f32)
+        }
+    }
+    build_ground(cam_x as f64, cam_z as f64)
+    r3d_draw_mesh(ident[0..16], vp[0..16], v3(sun_x, sun_y, sun_z), R3D_GOURAUD)
+
+    # Plants, through the spatial hash cells in front of the camera.
+    let cr: i32 = (view_r / HCELL) as i32 + 1
+    let ccx: i32 = (((cam_x as f64) + MAP_HALF) / HCELL) as i32
+    let ccz: i32 = (((cam_z as f64) + MAP_HALF) / HCELL) as i32
+    for gz in ccz - cr to ccz + cr + 1 {
+        for gx in ccx - cr to ccx + cr + 1 {
+            if gx >= 0 and gz >= 0 and gx < HG and gz < HG {
+                let wx: f64 = ((gx as f64) + 0.5) * HCELL - MAP_HALF - (cam_x as f64)
+                let wz: f64 = ((gz as f64) + 0.5) * HCELL - MAP_HALF - (cam_z as f64)
+                let d2: f64 = wx * wx + wz * wz
+                let ahead: f64 = wx * (cam_fx as f64) + wz * (cam_fz as f64)
+                let slack: f64 = 16.0 + (cull_slack as f64)
+                if d2 < (view_r + 12.0) * (view_r + 12.0) and ahead > 0.0 - slack {
+                    let mut aside: f64 = wx * (0.0 - (cam_fz as f64)) + wz * (cam_fx as f64)
+                    if aside < 0.0 { aside = -aside }
+                    if aside < ahead * 0.95 + slack {
+                        let mut k: i32 = hash_head[gz * HG + gx]
+                        while k >= 0 {
+                            if in_used[k] == 1 and in_stage[k] != ST_SEED { draw_plant(k) }
+                            k = in_next[k]
+                        }
+                    }
+                }
+            }
+        }
+    }
+    draw_grass()
+    post_light()
+}
+
+function is_sky(i: i32) -> bool {
+    return r3d_depth[i] > 1.0e29
+}
+
+function blend_px(i: i32, r: f32, g: f32, b: f32, a: f32) -> void {
+    let o: i32 = i * 3
+    let cr: f32 = r3d_color[o] as f32
+    let cg: f32 = r3d_color[o + 1] as f32
+    let cb: f32 = r3d_color[o + 2] as f32
+    r3d_color[o] = r3d_clampf(cr + (r * 255.0 - cr) * a, 0.0, 255.0) as u8
+    r3d_color[o + 1] = r3d_clampf(cg + (g * 255.0 - cg) * a, 0.0, 255.0) as u8
+    r3d_color[o + 2] = r3d_clampf(cb + (b * 255.0 - cb) * a, 0.0, 255.0) as u8
+}
+
+# A camera at eye looking at the origin, for the planet view.
+function set_orbit_camera(ex: f32, ey: f32, ez: f32) -> void {
+    m4_look_at(view_m, v3(ex, ey, ez), v3(0.0, 0.0, 0.0), v3(0.0, 1.0, 0.0))
+    m4_mul(vp, proj[0..16], view_m[0..16])
+    cam_x = ex
+    cam_y = ey
+    cam_z = ez
+}
+
+# Project a world point to a pixel (sk_x, sk_y, sk_z); false when off screen.
+let mut sk_z: f32 = 0.0
+
+function world_pixel(x: f32, y: f32, z: f32) -> bool {
+    let p: V3 = v3(x, y, z)
+    let q: V3 = m4_point(vp[0..16], p)
+    let w: f32 = m4_pointw(vp[0..16], p)
+    if w < 1.0 { return false }
+    sk_x = ((q.x / w * 0.5 + 0.5) * (RW as f32)) as i32
+    sk_y = ((0.5 - q.y / w * 0.5) * (RH as f32)) as i32
+    sk_z = q.z / w * 0.5 + 0.5
+    return sk_x >= 0 and sk_x < RW and sk_y >= 0 and sk_y < RH
+}
+
+function draw_planet_mesh(lx: f32, ly: f32, lz: f32) -> void {
+    r3d_draw_mesh(ident[0..16], vp[0..16], v3(lx, ly, lz), R3D_GOURAUD)
+}
+
+# Project a direction on the sky to a pixel; false when behind the camera.
+let mut sk_x: i32 = 0
+let mut sk_y: i32 = 0
+
+function sky_pixel(dx: f32, dy: f32, dz: f32) -> bool {
+    let p: V3 = v3(cam_x + dx * 400.0, cam_y + dy * 400.0, cam_z + dz * 400.0)
+    let q: V3 = m4_point(vp[0..16], p)
+    let w: f32 = m4_pointw(vp[0..16], p)
+    if w < 1.0 { return false }
+    sk_x = ((q.x / w * 0.5 + 0.5) * (RW as f32)) as i32
+    sk_y = ((0.5 - q.y / w * 0.5) * (RH as f32)) as i32
+    return sk_x >= 0 and sk_x < RW and sk_y >= 0 and sk_y < RH
+}
+
+# The hour's light over the whole frame, then what shines through the dark:
+# stars, the moon, rain and lightning.
+function post_light() -> void {
+    let fl: f32 = (flash * 1.4) as f32
+    let mut lr: i32 = ((tint_r as f32 + fl) * 256.0) as i32
+    let mut lg: i32 = ((tint_g as f32 + fl) * 256.0) as i32
+    let mut lb: i32 = ((tint_b as f32 + fl) * 256.0) as i32
+    if !sun_light {
+        lr = 256
+        lg = 256
+        lb = 256
+    }
+    let n: i32 = RW * RH
+    for i in 0 to n {
+        let o: i32 = i * 3
+        let mut r: i32 = ((r3d_color[o] as i32) * lr) >> 8
+        let mut g: i32 = ((r3d_color[o + 1] as i32) * lg) >> 8
+        let mut b: i32 = ((r3d_color[o + 2] as i32) * lb) >> 8
+        if r > 255 { r = 255 }
+        if g > 255 { g = 255 }
+        if b > 255 { b = 255 }
+        r3d_color[o] = r as u8
+        r3d_color[o + 1] = g as u8
+        r3d_color[o + 2] = b as u8
+    }
+
+    let night: f32 = ((1.0 - day_light) * (1.0 - cloud)) as f32
+    if night > 0.05 {
+        for s in 0 to N_STARS {
+            if sky_pixel(star_x[s], star_y[s], star_z[s]) {
+                let i: i32 = sk_y * RW + sk_x
+                if is_sky(i) {
+                    let tw: f32 = 0.55 + 0.45 * (sym_jitter(s * 7 + (rain_frame / 9)) as f32)
+                    blend_px(i, 0.92, 0.94, 1.0, night * tw)
+                }
+            }
+        }
+        # The moon, opposite the sun, hidden behind hills and trees.
+        let mx: f32 = (0.0 - sun_dx) as f32
+        let my: f32 = (0.0 - sun_dy) as f32
+        let mz: f32 = (0.0 - sun_dz) as f32
+        if my > -0.05 and sky_pixel(mx, my, mz) {
+            let cx: i32 = sk_x
+            let cy: i32 = sk_y
+            for dy in (0 - 16) to 17 {
+                for dx in (0 - 16) to 17 {
+                    let x: i32 = cx + dx
+                    let y: i32 = cy + dy
+                    if x >= 0 and x < RW and y >= 0 and y < RH {
+                        let i: i32 = y * RW + x
+                        if is_sky(i) {
+                            let d: f32 = sqrtf((dx * dx + dy * dy) as f32)
+                            if d < 5.0 {
+                                blend_px(i, 0.93, 0.94, 0.86, night)
+                            } else {
+                                if d < 16.0 { blend_px(i, 0.55, 0.62, 0.78, night * 0.18 * (1.0 - d / 16.0)) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    # Rain: short streaks slanted by the wind, faint in the dark.
+    rain_frame = rain_frame + 1
+    let drops: i32 = (rain * 900.0) as i32
+    if drops > 0 {
+        let slant: f32 = (wind_amp() * 0.9) as f32 + 0.3
+        let bright: f32 = (0.35 + 0.5 * day_light) as f32
+        for d in 0 to drops {
+            let h: u32 = ((d * 7919 + rain_frame * 104729) as u32) * 2654435761
+            let x0: i32 = ((h >> 8) % (RW as u32)) as i32
+            let y0: i32 = ((h >> 18) % (RH as u32)) as i32
+            let len: i32 = 5 + ((h >> 4) % 5) as i32
+            for t in 0 to len {
+                let x: i32 = x0 + ((t as f32) * slant * 0.35) as i32
+                let y: i32 = y0 + t
+                if x >= 0 and x < RW and y < RH {
+                    blend_px(y * RW + x, 0.72 * bright, 0.77 * bright, 0.85 * bright, 0.32)
+                }
+            }
+        }
+    }
+}
+
+function sun_glow(gx: f32, gy: f32, power: f32) -> void {
+    let r: i32 = 34
+    for dy in 0 - r to r + 1 {
+        for dx in 0 - r to r + 1 {
+            let x: i32 = (gx as i32) + dx
+            let y: i32 = (gy as i32) + dy
+            if x >= 0 and x < RW and y >= 0 and y < RH {
+                let d: f32 = sqrtf((dx * dx + dy * dy) as f32)
+                let mut a: f32 = 0.0
+                if d < 7.0 {
+                    a = power
+                } else {
+                    a = (1.0 - d / (r as f32)) * 0.35 * power
+                }
+                if a > 0.0 {
+                    let o: i32 = (y * RW + x) * 3
+                    let cr: f32 = r3d_color[o] as f32
+                    let cg: f32 = r3d_color[o + 1] as f32
+                    let cb: f32 = r3d_color[o + 2] as f32
+                    r3d_color[o] = (cr + (255.0 - cr) * a) as u8
+                    r3d_color[o + 1] = (cg + (246.0 - cg) * a) as u8
+                    r3d_color[o + 2] = (cb + (214.0 - cb) * a) as u8
+                }
+            }
+        }
+    }
+}
+
+# Double the frame into the window, dimming the HUD bands, and blit it.
+function view_present(g: Gfx) -> void {
+    for y in 0 to WIN_H {
+        let sy: i32 = y / 2
+        let mut dim: i32 = 256
+        if y < HUD3_H or y >= FOOT_Y { dim = 70 }
+        let srow: i32 = sy * RW * 3
+        let drow: i32 = y * WIN_W * 3
+        for x in 0 to RW {
+            let so: i32 = srow + x * 3
+            let r: u8 = ((r3d_color[so] as i32) * dim / 256) as u8
+            let gg: u8 = ((r3d_color[so + 1] as i32) * dim / 256) as u8
+            let b: u8 = ((r3d_color[so + 2] as i32) * dim / 256) as u8
+            let d: i32 = drow + x * 6
+            big[d] = r
+            big[d + 1] = gg
+            big[d + 2] = b
+            big[d + 3] = r
+            big[d + 4] = gg
+            big[d + 5] = b
+        }
+    }
+    gfx_blit_rgb(g, 0, 0, WIN_W, WIN_H, big)
+}

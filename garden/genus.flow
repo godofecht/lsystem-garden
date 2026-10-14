@@ -1,0 +1,546 @@
+# Species generated from the world seed. Each world adds a hundred
+# species to the nineteen written by hand, so no two worlds share a flora.
+#
+# A generated species is built the way the hand-written ones are: an axiom,
+# productions for one to three symbols, an angle and a generation count. The
+# productions are drawn from a growth form's motifs, so a generated shrub
+# branches like a shrub and a generated conifer whorls like a conifer, but
+# the combination, the angles, the colours, the niche and the life history
+# are its own.
+#
+# GROWTH FORMS
+#   spike      a herb with one or a few stems that end in a flower
+#   cluster    a herb that forks into many flowering heads
+#   shrub      a woody branching grammar on X, with F -> FF
+#   frond      a fern-like grammar with a narrow angle
+#   tuft       grass blades from one point
+#   tree       a 3D grammar: whorls of pitched branches with rolls between
+#   conifer    a 3D grammar: a leader with whorls of needled limbs
+#
+# Names are made from syllables, in two parts like a binomial.
+
+import "./common.flow"
+import "./species.flow"
+import "./life.flow"
+
+const N_GENERATED: i32 = 100
+
+const FORM_SPIKE: i32 = 0
+const FORM_CLUSTER: i32 = 1
+const FORM_SHRUB: i32 = 2
+const FORM_FROND: i32 = 3
+const FORM_TUFT: i32 = 4
+const FORM_TREE: i32 = 5
+const FORM_CONIFER: i32 = 6
+
+# ---------------------------------------------------------------- text arena
+
+let mut gt_start: i32 = 0
+
+function gt_begin() -> void {
+    gt_start = gtext_n
+}
+
+function gt_add(s: string) -> void {
+    let b: ptr<u8> = s as ptr<u8>
+    let mut i: i32 = 0
+    while b[i] != 0 and gtext_n < GTEXT_CAP - 2 {
+        gtext[gtext_n] = b[i]
+        gtext_n = gtext_n + 1
+        i = i + 1
+    }
+}
+
+function gt_char(c: i32) -> void {
+    if gtext_n < GTEXT_CAP - 2 {
+        gtext[gtext_n] = c as u8
+        gtext_n = gtext_n + 1
+    }
+}
+
+function gt_end() -> i32 {
+    gtext[gtext_n] = 0 as u8
+    gtext_n = gtext_n + 1
+    return gt_start
+}
+
+function gt_copy(off: i32) -> void {
+    let mut i: i32 = off
+    while gtext[i] != 0 {
+        gt_char(gtext[i] as i32)
+        i = i + 1
+    }
+}
+
+# ---------------------------------------------------------------- motifs
+
+function pick_of(n: i32) -> i32 {
+    return rng_below(n)
+}
+
+function spike_motif(k: i32) -> string {
+    if k == 0 { return "FA" }
+    if k == 1 { return "F+A" }
+    if k == 2 { return "F-A" }
+    if k == 3 { return "F[+L]A" }
+    if k == 4 { return "F[-L]A" }
+    if k == 5 { return "F[+K]F[-K]A" }
+    if k == 6 { return "FF[+L][-L]A" }
+    return "F[-L]F[+L]A"
+}
+
+function cluster_motif(k: i32) -> string {
+    if k == 0 { return "F[+L]F[-A]A" }
+    if k == 1 { return "F[-L]F[+A]A" }
+    if k == 2 { return "FF[+L]A" }
+    if k == 3 { return "F[+A][-A]" }
+    if k == 4 { return "F[-A]FA" }
+    return "F[+A]F[-L]A"
+}
+
+function shrub_motif(k: i32) -> string {
+    if k == 0 { return "F[+X]F[-X]+X" }
+    if k == 1 { return "F[-X]F[+X]-X" }
+    if k == 2 { return "F[+X][-X]FX" }
+    if k == 3 { return "F+[[X]-X]-F[-FX]+X" }
+    if k == 4 { return "F[+X]F[-X]FX" }
+    if k == 5 { return "FF[+X][--X]X" }
+    return "F[-X][+X]F[+X]X"
+}
+
+function frond_motif(k: i32) -> string {
+    if k == 0 { return "F[+X]F[-X]+X" }
+    if k == 1 { return "F[-X]F[+X]-X" }
+    if k == 2 { return "F[+X][-X]FX" }
+    return "F[+X]F[-X]X"
+}
+
+function spike_axiom(k: i32) -> string {
+    if k == 0 { return "A" }
+    if k == 1 { return "[--L][++L]A" }
+    if k == 2 { return "[---L][+++L][-A][A][+A]" }
+    if k == 3 { return "[--A][-A][A][+A][++A]" }
+    return "[-L][+L][-A][+A]"
+}
+
+function end_for(form: i32) -> i32 {
+    let k: i32 = rng_below(6)
+    if k == 0 { return END_DAISY }
+    if k == 1 { return END_TULIP }
+    if k == 2 { return END_SPIKE }
+    if k == 3 { return END_PUFF }
+    if k == 4 and form == FORM_SPIKE { return END_SUN }
+    return END_BUD
+}
+
+# A rule set: symbol c with n distinct motifs.
+let mut rule_slot: i32 = 0
+
+function add_rule(sp: i32, c: i32, n: i32, form: i32) -> void {
+    let i: i32 = sp * 3 + rule_slot
+    g_sym[i] = c
+    g_nvar[i] = n
+    let mut used: i32 = 0
+    for v in 0 to n {
+        gt_begin()
+        let mut k: i32 = 0
+        # Distinct motifs per symbol.
+        let mut tries: i32 = 0
+        while tries < 12 {
+            k = rng_below(8)
+            if (used & (1 << k)) == 0 { tries = 99 }
+            tries = tries + 1
+        }
+        used = used | (1 << k)
+        if form == FORM_SPIKE { gt_add(spike_motif(k)) }
+        if form == FORM_CLUSTER { gt_add(cluster_motif(k % 6)) }
+        if form == FORM_SHRUB { gt_add(shrub_motif(k % 7)) }
+        if form == FORM_FROND { gt_add(frond_motif(k % 4)) }
+        g_body[i * 4 + v] = gt_end()
+    }
+    rule_slot = rule_slot + 1
+}
+
+# A rule from literal productions.
+function add_rule_lit(sp: i32, c: i32, a: string, b: string) -> void {
+    let i: i32 = sp * 3 + rule_slot
+    g_sym[i] = c
+    g_nvar[i] = 1
+    gt_begin()
+    gt_add(a)
+    g_body[i * 4] = gt_end()
+    if (b as ptr<u8>)[0] != 0 {
+        g_nvar[i] = 2
+        gt_begin()
+        gt_add(b)
+        g_body[i * 4 + 1] = gt_end()
+    }
+    rule_slot = rule_slot + 1
+}
+
+# The printed form of the rules, for the HUD: "A->x | y  F->FF".
+function write_rules_text(sp: i32) -> void {
+    gt_begin()
+    for i in 0 to rule_slot {
+        let q: i32 = sp * 3 + i
+        if i > 0 { gt_add("  ") }
+        gt_char(g_sym[q])
+        gt_add("->")
+        for v in 0 to g_nvar[q] {
+            if v > 0 { gt_add(" | ") }
+            gt_copy(g_body[q * 4 + v])
+        }
+    }
+    g_rules[sp] = gt_end()
+}
+
+# ---------------------------------------------------------------- names
+
+function name_root(form: i32, k: i32) -> string {
+    if form == FORM_TREE or form == FORM_CONIFER {
+        if k == 0 { return "ARBOR" }
+        if k == 1 { return "QUERN" }
+        if k == 2 { return "LARIX" }
+        if k == 3 { return "THALL" }
+        if k == 4 { return "CEDR" }
+        return "SYLV"
+    }
+    if form == FORM_TUFT { if k < 3 { return "CAREX" } return "FESTA" }
+    if form == FORM_FROND { if k < 3 { return "PTERA" } return "DRYOP" }
+    if k == 0 { return "ASPER" }
+    if k == 1 { return "CALYX" }
+    if k == 2 { return "FLOREL" }
+    if k == 3 { return "MIRA" }
+    if k == 4 { return "PETRA" }
+    return "ZINN"
+}
+
+function name_suffix(k: i32) -> string {
+    if k == 0 { return "IA" }
+    if k == 1 { return "ELLA" }
+    if k == 2 { return "ANTHE" }
+    if k == 3 { return "ARIA" }
+    if k == 4 { return "OPSIS" }
+    if k == 5 { return "IUM" }
+    return "ORA"
+}
+
+function name_epithet(k: i32) -> string {
+    if k == 0 { return "ALBA" }
+    if k == 1 { return "NIMBA" }
+    if k == 2 { return "VESPERA" }
+    if k == 3 { return "BOREALIS" }
+    if k == 4 { return "MINOR" }
+    if k == 5 { return "GRANDIS" }
+    if k == 6 { return "RIPARIA" }
+    if k == 7 { return "SYLVA" }
+    if k == 8 { return "AUREA" }
+    if k == 9 { return "RUBRA" }
+    if k == 10 { return "CAERULEA" }
+    if k == 11 { return "STELLATA" }
+    if k == 12 { return "LENTA" }
+    if k == 13 { return "NIVEA" }
+    if k == 14 { return "UMBRA" }
+    return "VAGA"
+}
+
+# ---------------------------------------------------------------- one species
+
+function frand(a: f64, b: f64) -> f64 {
+    return a + (b - a) * rng_unit()
+}
+
+function irand(a: i32, b: i32) -> i32 {
+    return a + rng_below(b - a + 1)
+}
+
+function form_for(k: i32) -> i32 {
+    # Herbs are most common, then shrubs and trees.
+    let r: i32 = k % 20
+    if r < 5 { return FORM_SPIKE }
+    if r < 9 { return FORM_CLUSTER }
+    if r < 12 { return FORM_SHRUB }
+    if r < 14 { return FORM_FROND }
+    if r < 16 { return FORM_TUFT }
+    if r < 18 { return FORM_TREE }
+    return FORM_CONIFER
+}
+
+function leaf_colour() -> i32 {
+    let k: i32 = rng_below(20)
+    if k == 0 { return pack3(irand(120, 160), irand(50, 80), irand(70, 110)) }
+    if k == 1 { return pack3(irand(150, 180), irand(170, 190), irand(160, 185)) }
+    return pack3(irand(50, 120), irand(120, 200), irand(50, 100))
+}
+
+function flower_colour() -> i32 {
+    let k: i32 = rng_below(7)
+    if k == 0 { return pack3(irand(220, 250), irand(40, 90), irand(60, 110)) }
+    if k == 1 { return pack3(irand(230, 255), irand(190, 225), irand(30, 70)) }
+    if k == 2 { return pack3(irand(150, 200), irand(90, 140), irand(210, 250)) }
+    if k == 3 { return pack3(irand(235, 250), irand(235, 250), irand(235, 250)) }
+    if k == 4 { return pack3(irand(230, 255), irand(110, 160), irand(30, 60)) }
+    if k == 5 { return pack3(irand(80, 130), irand(120, 170), irand(220, 250)) }
+    return pack3(irand(230, 255), irand(140, 180), irand(190, 220))
+}
+
+function make_species(sp: i32, k: i32) -> void {
+    let form: i32 = form_for(k + rng_below(3))
+    rule_slot = 0
+    for i in 0 to 3 { g_sym[sp * 3 + i] = 0 }
+    sp_tree[sp] = 0
+
+    gt_begin()
+    gt_add(name_root(form, rng_below(6)))
+    gt_add(name_suffix(rng_below(7)))
+    gt_add(" ")
+    gt_add(name_epithet(rng_below(16)))
+    g_name[sp] = gt_end()
+
+    let mut angle: f64 = 20.0
+    let mut gens: i32 = 5
+    let mut height: f64 = 0.4
+    let mut flex: f64 = 8.0
+    let mut rad: f64 = 1.2
+    let mut tip: i32 = TIP_NONE
+    let mut end: i32 = END_NONE
+    let mut leaf: f64 = 6.0
+    let mut h3: f64 = 0.6
+    let mut roll: f64 = 137.5
+    let mut decay: f64 = 0.72
+    let mut trop: f64 = 0.0
+    let mut leafw: f64 = frand(0.25, 0.55)
+    let mut kind: i32 = K_HERB
+    let mut decid: i32 = 0
+    let mut grow: f64 = frand(10.0, 40.0)
+    let mut life: f64 = frand(150.0, 800.0)
+    let mut seeds: f64 = frand(3.0, 14.0)
+    let mut disp: f64 = frand(4.0, 20.0)
+    let mut space: f64 = frand(0.4, 1.0)
+
+    if form == FORM_SPIKE {
+        gt_begin()
+        gt_add(spike_axiom(rng_below(5)))
+        g_axiom[sp] = gt_end()
+        add_rule(sp, CH_A, irand(2, 3), form)
+        angle = frand(6.0, 28.0)
+        gens = irand(4, 7)
+        end = end_for(form)
+        leaf = frand(6.0, 18.0)
+        height = frand(0.2, 0.5)
+        h3 = frand(0.3, 1.2)
+        rad = frand(0.8, 1.4)
+        flex = frand(7.0, 12.0)
+        if rng_below(3) == 0 { kind = K_ANNUAL }
+    }
+    if form == FORM_CLUSTER {
+        gt_begin()
+        gt_add("A")
+        g_axiom[sp] = gt_end()
+        add_rule(sp, CH_A, irand(2, 3), form)
+        angle = frand(18.0, 40.0)
+        gens = irand(4, 5)
+        end = END_DAISY
+        if rng_below(3) == 0 { end = END_PUFF }
+        if rng_below(4) == 0 { end = END_BUD }
+        leaf = frand(4.0, 8.0)
+        height = frand(0.25, 0.45)
+        h3 = frand(0.4, 1.0)
+        rad = frand(0.8, 1.2)
+        flex = frand(7.0, 11.0)
+    }
+    if form == FORM_SHRUB {
+        gt_begin()
+        gt_add("X")
+        g_axiom[sp] = gt_end()
+        add_rule(sp, 88, irand(1, 3), form)
+        add_rule_lit(sp, CH_F, "FF", "")
+        angle = frand(18.0, 35.0)
+        gens = irand(4, 5)
+        tip = TIP_LEAF
+        let t: i32 = rng_below(4)
+        if t == 0 { tip = TIP_BERRY }
+        if t == 1 { tip = TIP_ROSE }
+        leaf = frand(3.0, 6.0)
+        height = frand(0.35, 0.6)
+        h3 = frand(0.7, 2.5)
+        rad = frand(1.5, 2.6)
+        flex = frand(4.0, 7.0)
+        kind = K_WOODY
+        if rng_below(5) < 3 { decid = 1 }
+        grow = frand(40.0, 90.0)
+        life = frand(900.0, 1500.0)
+        seeds = frand(3.0, 7.0)
+        space = frand(1.4, 2.2)
+    }
+    if form == FORM_FROND {
+        gt_begin()
+        gt_add("X")
+        g_axiom[sp] = gt_end()
+        add_rule(sp, 88, irand(2, 3), form)
+        add_rule_lit(sp, CH_F, "FF", "")
+        angle = frand(8.0, 18.0)
+        gens = irand(5, 6)
+        tip = TIP_LEAF
+        leaf = frand(3.0, 5.0)
+        height = frand(0.5, 0.7)
+        h3 = frand(0.6, 1.4)
+        rad = frand(1.6, 2.2)
+        flex = frand(6.0, 8.0)
+    }
+    if form == FORM_TUFT {
+        let blades: i32 = irand(3, 7)
+        gt_begin()
+        for b in 0 to blades {
+            gt_add("[")
+            let off: i32 = b - blades / 2
+            if off < 0 { for q in 0 to 0 - off { gt_add("-") } }
+            if off > 0 { for q in 0 to off { gt_add("+") } }
+            gt_add("B]")
+        }
+        g_axiom[sp] = gt_end()
+        add_rule_lit(sp, 66, "FB", "F+B")
+        angle = frand(4.0, 9.0)
+        gens = irand(6, 9)
+        height = frand(0.15, 0.25)
+        h3 = frand(0.25, 0.6)
+        rad = frand(0.7, 0.9)
+        flex = frand(14.0, 18.0)
+    }
+    if form == FORM_TREE {
+        let n: i32 = irand(2, 3)
+        let r1: i32 = irand(3, 6)
+        let r2: i32 = irand(5, 8)
+        gt_begin()
+        gt_add("[&FL!A]")
+        for q in 0 to r1 { gt_add("/") }
+        gt_add("[&FL!A]")
+        if n == 3 {
+            for q in 0 to r2 { gt_add("/") }
+            gt_add("[&FL!A]")
+        }
+        let rule_a: i32 = gt_end()
+        let i: i32 = sp * 3
+        g_sym[i] = CH_A
+        g_nvar[i] = 1
+        g_body[i * 4] = rule_a
+        rule_slot = 1
+        add_rule_lit(sp, CH_F, "S/////F", "")
+        add_rule_lit(sp, 83, "F", "")
+        gt_begin()
+        gt_add("FFA")
+        g_axiom[sp] = gt_end()
+        angle = frand(18.0, 40.0)
+        gens = 6
+        if n == 2 { gens = 7 }
+        roll = frand(18.0, 40.0)
+        decay = frand(0.9, 1.0)
+        trop = frand(-0.02, 0.28)
+        leaf = frand(18.0, 34.0)
+        height = 1.0
+        h3 = frand(6.0, 14.0)
+        rad = frand(9.0, 20.0)
+        flex = frand(2.0, 4.0)
+        kind = K_WOODY
+        if rng_below(4) < 3 { decid = 1 }
+        grow = frand(150.0, 300.0)
+        life = frand(1500.0, 3000.0)
+        seeds = frand(3.0, 8.0)
+        disp = frand(12.0, 40.0)
+        space = frand(3.5, 6.0)
+        sp_tree[sp] = 1
+    }
+    if form == FORM_CONIFER {
+        let n: i32 = irand(3, 6)
+        gt_begin()
+        gt_add("FF")
+        for q in 0 to n { gt_add("[&B]/") }
+        gt_add("A")
+        let rule_a: i32 = gt_end()
+        let i: i32 = sp * 3
+        g_sym[i] = CH_A
+        g_nvar[i] = 1
+        g_body[i * 4] = rule_a
+        rule_slot = 1
+        add_rule_lit(sp, 66, "F[+L][-L][&L][^L]B", "F[+L][-L]B")
+        gt_begin()
+        gt_add("FA")
+        g_axiom[sp] = gt_end()
+        angle = frand(60.0, 95.0)
+        gens = irand(8, 11)
+        roll = 360.0 / (n as f64) + frand(-6.0, 6.0)
+        decay = frand(0.45, 0.6)
+        trop = frand(0.0, 0.08)
+        leaf = frand(18.0, 30.0)
+        leafw = frand(0.15, 0.35)
+        height = 1.0
+        h3 = frand(7.0, 15.0)
+        rad = frand(8.0, 12.0)
+        flex = frand(1.5, 3.0)
+        kind = K_WOODY
+        grow = frand(150.0, 260.0)
+        life = frand(1500.0, 2600.0)
+        seeds = frand(4.0, 8.0)
+        disp = frand(15.0, 35.0)
+        space = frand(3.5, 5.0)
+        sp_tree[sp] = 1
+    }
+    if end == END_PUFF { disp = frand(30.0, 45.0) }
+    write_rules_text(sp)
+
+    set_species(sp, angle, gens, height, flex, rad, 0.0, tip, end, leaf)
+    set_species3(sp, h3, roll, decay, trop, leafw)
+    let lc: i32 = leaf_colour()
+    let bark_r: i32 = irand(70, 130)
+    let bark_g: i32 = irand(60, 110)
+    let bark_b: i32 = irand(40, 80)
+    if sp_tree[sp] == 1 and rng_below(5) == 0 {
+        set_species_col(sp, 220, 216, 204, 160, 150, 132, col_r(lc), col_g(lc), col_b(lc))
+    } else {
+        if kind == K_WOODY {
+            set_species_col(sp, bark_r, bark_g, bark_b, bark_r - 10, bark_g, bark_b,
+                            col_r(lc), col_g(lc), col_b(lc))
+        } else {
+            set_species_col(sp, col_r(lc) - 10, col_g(lc) - 30, col_b(lc) - 10,
+                            col_r(lc) + 10, col_g(lc) + 20, col_b(lc),
+                            col_r(lc), col_g(lc), col_b(lc))
+        }
+    }
+    g_flower[sp] = flower_colour()
+
+    let fl0: f64 = frand(2.0, 54.0)
+    set_life(sp, kind, decid, grow, life, fl0, fl0 + frand(12.0, 24.0), seeds, disp, space)
+    let mut e0: f64 = frand(0.3, 22.0)
+    let mut e1: f64 = e0 + frand(6.0, 25.0)
+    let mut m0: f64 = frand(0.0, 0.6)
+    let mut m1: f64 = m0 + frand(0.25, 0.5)
+    if rng_below(7) == 0 and !is_tree(sp) {
+        # A plant of the water's edge.
+        e0 = -0.3
+        e1 = 1.5
+        m0 = 0.75
+        m1 = 1.0
+    }
+    if form == FORM_CONIFER and e0 < 5.0 { e0 = 5.0 }
+    let autumn: i32 = pack3(irand(170, 240), irand(60, 190), irand(20, 60))
+    set_niche(sp, e0, e1, m0, m1, frand(0.1, 0.8), 0.45, autumn)
+    # A temperature range fitted to the form: conifers cold, everything else
+    # anywhere from the tundra to the tropics.
+    let mut tc: f64 = frand(0.15, 0.92)
+    if form == FORM_CONIFER { tc = frand(0.12, 0.42) }
+    if form == FORM_TREE { tc = frand(0.3, 0.88) }
+    let tw: f64 = frand(0.14, 0.26)
+    set_temp(sp, tc - tw, tc + tw)
+}
+
+# Replace any generated species with a fresh set for this world.
+function generate_species() -> void {
+    gtext_n = 0
+    N_SPECIES = N_BASE_SPECIES
+    for k in 0 to N_GENERATED {
+        if N_SPECIES < MAX_SPECIES {
+            make_species(N_SPECIES, k)
+            N_SPECIES = N_SPECIES + 1
+        }
+    }
+}

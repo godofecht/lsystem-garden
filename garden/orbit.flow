@@ -1,0 +1,463 @@
+# The planet view: the whole living world on a small sphere, seen from
+# orbit.
+#
+# The map's grid is read as longitude and latitude (terrain.flow), so every
+# plant has a place on the sphere: its map position gives a direction from
+# the centre, and its height above water, exaggerated, gives the radius.
+# Each plant stands along that direction, with its yaw turned about it, and
+# is drawn larger than scale so it reads from orbit.
+#
+# The sun circles with the hour, so the line between day and night sweeps
+# round. The ground is lit by it per vertex, and each plant by the sunlight
+# where it stands, so the night side is dark.
+#
+#   arrows, A D, drag or the captured mouse    turn the planet
+#   W S or the scroll wheel                    nearer and further
+#   L                                          sunlight or even light
+#   N                                          small, medium or large planet
+#   point at the planet to read the biome, its temperature and the nearest
+#   plant; click to plant the chosen seed there
+
+import "stdlib/gfx.flow"
+import "stdlib/text.flow"
+import "stdlib/render3d.flow"
+import "./common.flow"
+import "./species.flow"
+import "./calendar.flow"
+import "./terrain.flow"
+import "./models.flow"
+import "./life.flow"
+import "./sky.flow"
+import "./control.flow"
+import "./view.flow"
+import "./hud.flow"
+
+const RELIEF: f64 = 0.35
+const N_LON: i32 = 96
+const N_LAT: i32 = 56
+
+let mut o_yaw: f64 = 0.6
+let mut o_pitch: f64 = 0.35
+let mut o_dist: f64 = 3.2
+let mut o_idle: i32 = 0
+let mut o_wheel: i32 = 0
+let mut o_drag: bool = false
+let mut o_dx: i32 = 0
+let mut o_dy: i32 = 0
+let mut o_moved: bool = false
+let mut o_px: i32 = 0
+let mut o_py: i32 = 0
+let mut o_focus: i32 = -1
+let mut o_hit: bool = false
+let mut o_hx: f64 = 0.0
+let mut o_hz: f64 = 0.0
+let mut o_lx: f64 = 0.0
+let mut o_ly: f64 = 0.0
+let mut o_lz: f64 = 0.0
+
+# Direction from the planet's centre for map point (x, z).
+let mut dir_x: f64 = 0.0
+let mut dir_y: f64 = 0.0
+let mut dir_z: f64 = 0.0
+
+function map_dir(x: f64, z: f64) -> void {
+    let lon: f64 = lon_of(x)
+    let lat: f64 = lat_of(z)
+    dir_x = cos(lat) * cos(lon)
+    dir_y = sin(lat)
+    dir_z = cos(lat) * sin(lon)
+}
+
+function surf_r(x: f64, z: f64) -> f64 {
+    return planet_r() + surface_h(x, z) * RELIEF
+}
+
+# Plants drawn larger than scale, a little less so on a small planet.
+function plant_exag() -> f32 {
+    return (1.6 * sqrt(planet_r() / 81.0)) as f32
+}
+
+# The sun's direction, circling with the hour and tilted with the season.
+function o_sun() -> void {
+    let a: f64 = tod * 2.0 * PI
+    o_lx = cos(a)
+    o_lz = sin(a)
+    o_ly = 0.2 + 0.3 * cos(2.0 * PI * (doy() - 36.0) / YEAR)
+    let n: f64 = sqrt(o_lx * o_lx + o_ly * o_ly + o_lz * o_lz)
+    o_lx = o_lx / n
+    o_ly = o_ly / n
+    o_lz = o_lz / n
+}
+
+function build_planet_mesh() -> void {
+    r3d_mesh_reset()
+    for j in 0 to N_LAT + 1 {
+        let v: f64 = (j as f64) / (N_LAT as f64)
+        let lat: f64 = (v - 0.5) * PI
+        # Map z for this latitude, clamped where the grid stops near the poles.
+        let mut z: f64 = lat / (PI * 0.5 * 0.94) * MAP_HALF
+        if z > MAP_HALF - 1.0 { z = MAP_HALF - 1.0 }
+        if z < 1.0 - MAP_HALF { z = 1.0 - MAP_HALF }
+        for i in 0 to N_LON + 1 {
+            let u: f64 = (i as f64) / (N_LON as f64)
+            let lon: f64 = (u - 0.5) * 2.0 * PI
+            let x: f64 = lon / PI * MAP_HALF
+            let r: f64 = surf_r(x, z)
+            let nx: f64 = cos(lat) * cos(lon)
+            let ny: f64 = sin(lat)
+            let nz: f64 = cos(lat) * sin(lon)
+            ground_colour(x, z)
+            # Biome colours pushed apart, so deserts, jungles, tundra and ice
+            # read from orbit. Past the grid's edge the poles are ice.
+            let grey: f64 = (gc_r + gc_g + gc_b) / 3.0
+            let mut cr: f64 = clamp01(grey + (gc_r - grey) * 1.7)
+            let mut cg: f64 = clamp01(grey + (gc_g - grey) * 1.7)
+            let mut cb: f64 = clamp01(grey + (gc_b - grey) * 1.7)
+            let polar: f64 = ramp(abs_f(lat), PI * 0.5 * 0.9, PI * 0.5 * 0.97)
+            cr = cr + (0.92 - cr) * polar
+            cg = cg + (0.95 - cg) * polar
+            cb = cb + (0.98 - cb) * polar
+            let vi: i32 = r3d_mesh_vertex(v3((nx * r) as f32, (ny * r) as f32, (nz * r) as f32),
+                                          v3(nx as f32, ny as f32, nz as f32),
+                                          v3(cr as f32, cg as f32, cb as f32))
+        }
+    }
+    let row: i32 = N_LON + 1
+    for j in 0 to N_LAT {
+        for i in 0 to N_LON {
+            let a: i32 = j * row + i
+            let ok1: bool = r3d_mesh_tri(a, a + 1, a + row)
+            let ok2: bool = r3d_mesh_tri(a + 1, a + row + 1, a + row)
+        }
+    }
+}
+
+function abs_f(v: f64) -> f64 {
+    if v < 0.0 { return 0.0 - v }
+    return v
+}
+
+function orbit_reset() -> void {
+    o_yaw = 0.6
+    o_pitch = 0.35
+    o_dist = 3.2
+    o_focus = -1
+}
+
+function orbit_eye_x() -> f64 { return o_dist * planet_r() * cos(o_pitch) * sin(o_yaw) }
+function orbit_eye_y() -> f64 { return o_dist * planet_r() * sin(o_pitch) }
+function orbit_eye_z() -> f64 { return o_dist * planet_r() * cos(o_pitch) * cos(o_yaw) }
+
+function orbit_update(g: Gfx, seed_sp: i32) -> void {
+    let mut turned: bool = false
+    let step: f64 = 0.02
+    if gfx_key_down(g, KEY_LEFT) or gfx_key_down(g, KEY_A) {
+        o_yaw = o_yaw - step
+        turned = true
+    }
+    if gfx_key_down(g, KEY_RIGHT) or gfx_key_down(g, KEY_D) {
+        o_yaw = o_yaw + step
+        turned = true
+    }
+    if gfx_key_down(g, KEY_UP) {
+        o_pitch = o_pitch + step
+        turned = true
+    }
+    if gfx_key_down(g, KEY_DOWN) {
+        o_pitch = o_pitch - step
+        turned = true
+    }
+    if gfx_key_down(g, KEY_W) { o_dist = o_dist * 0.985 }
+    if gfx_key_down(g, KEY_S) { o_dist = o_dist * 1.015 }
+
+    let ms: Mouse = gfx_mouse(g)
+    let dw: i32 = ms.wheel - o_wheel
+    o_wheel = ms.wheel
+    if dw != 0 { o_dist = o_dist * exp(0.0 - (dw as f64) * 0.08) }
+    if ctl_captured {
+        o_yaw = o_yaw + ctl_look_x * 0.004
+        o_pitch = o_pitch + ctl_look_y * 0.004
+        if ctl_look_x != 0.0 or ctl_look_y != 0.0 { turned = true }
+        if ctl_plant { o_plant(WIN_W / 2, (HUD3_H + FOOT_Y) / 2, seed_sp) }
+    } else {
+        if ms.left != 0 and ms.inside != 0 {
+            if !o_drag {
+                o_drag = true
+                o_moved = false
+                o_px = ms.x
+                o_py = ms.y
+                o_dx = ms.x
+                o_dy = ms.y
+            } else {
+                let mx: i32 = ms.x - o_dx
+                let my: i32 = ms.y - o_dy
+                if (ms.x - o_px) * (ms.x - o_px) + (ms.y - o_py) * (ms.y - o_py) > 25 { o_moved = true }
+                if o_moved {
+                    o_yaw = o_yaw + (mx as f64) * 0.006
+                    o_pitch = o_pitch + (my as f64) * 0.006
+                    turned = true
+                }
+                o_dx = ms.x
+                o_dy = ms.y
+            }
+        } else {
+            if o_drag and !o_moved and o_py > HUD3_H and o_py < FOOT_Y { o_plant(o_px, o_py, seed_sp) }
+            o_drag = false
+        }
+    }
+    ctl_look_x = 0.0
+    ctl_look_y = 0.0
+    ctl_plant = false
+
+    # Left alone, the planet turns slowly.
+    if turned { o_idle = 0 } else { o_idle = o_idle + 1 }
+    if o_idle > 180 { o_yaw = o_yaw + 0.0015 }
+    if o_pitch > 1.45 { o_pitch = 1.45 }
+    if o_pitch < 0.0 - 1.45 { o_pitch = 0.0 - 1.45 }
+    if o_dist < 1.5 { o_dist = 1.5 }
+    if o_dist > 8.0 { o_dist = 8.0 }
+    # Nothing grows under a walker who is not there.
+    walker_x = 1.0e9
+    walker_z = 1.0e9
+}
+
+# A ray through window pixel (px, py) from the orbiting eye. Sets o_hit and
+# the map point it meets.
+function o_pick(px: i32, py: i32) -> void {
+    o_hit = false
+    let ex: f64 = orbit_eye_x()
+    let ey: f64 = orbit_eye_y()
+    let ez: f64 = orbit_eye_z()
+    let el: f64 = sqrt(ex * ex + ey * ey + ez * ez)
+    let fx: f64 = 0.0 - ex / el
+    let fy: f64 = 0.0 - ey / el
+    let fz: f64 = 0.0 - ez / el
+    # Right is forward x up, up is right x forward.
+    let mut rx: f64 = fy * 0.0 - fz * 1.0
+    let mut ry: f64 = fz * 0.0 - fx * 0.0
+    let mut rz: f64 = fx * 1.0 - fy * 0.0
+    let rl: f64 = sqrt(rx * rx + ry * ry + rz * rz)
+    rx = rx / rl
+    ry = ry / rl
+    rz = rz / rl
+    let ux: f64 = ry * fz - rz * fy
+    let uy: f64 = rz * fx - rx * fz
+    let uz: f64 = rx * fy - ry * fx
+    let t: f64 = 1.0 / (foc as f64)
+    let ndx: f64 = ((px as f64) / (WIN_W as f64) * 2.0 - 1.0) * t * ((RW as f64) / (RH as f64))
+    let ndy: f64 = (1.0 - (py as f64) / (WIN_H as f64) * 2.0) * t
+    let mut dx: f64 = fx + rx * ndx + ux * ndy
+    let mut dy: f64 = fy + ry * ndx + uy * ndy
+    let mut dz: f64 = fz + rz * ndx + uz * ndy
+    let dl: f64 = sqrt(dx * dx + dy * dy + dz * dz)
+    dx = dx / dl
+    dy = dy / dl
+    dz = dz / dl
+    # Meet the sphere at the mean radius.
+    let r: f64 = planet_r()
+    let b: f64 = ex * dx + ey * dy + ez * dz
+    let c: f64 = ex * ex + ey * ey + ez * ez - r * r
+    let disc: f64 = b * b - c
+    if disc < 0.0 { return }
+    let tt0: f64 = 0.0 - b - sqrt(disc)
+    if tt0 < 0.0 { return }
+    let hx: f64 = (ex + dx * tt0) / r
+    let hy: f64 = (ey + dy * tt0) / r
+    let hz: f64 = (ez + dz * tt0) / r
+    let lat: f64 = atan2(hy, sqrt(hx * hx + hz * hz))
+    let lon: f64 = atan2(hz, hx)
+    o_hx = lon / PI * MAP_HALF
+    o_hz = lat / (PI * 0.5 * 0.94) * MAP_HALF
+    if o_hz > MAP_HALF - 1.0 or o_hz < 1.0 - MAP_HALF { return }
+    o_hit = true
+}
+
+function o_plant(px: i32, py: i32, seed_sp: i32) -> void {
+    o_pick(px, py)
+    if !o_hit { return }
+    if ground_h(o_hx, o_hz) < -0.3 { return }
+    let mut sp: i32 = seed_sp
+    if sp < 0 { sp = rng_below(N_SPECIES) }
+    let k: i32 = plant_seed(sp, o_hx, o_hz)
+    if k >= 0 { o_focus = k }
+}
+
+# The nearest living plant to a map point, through the spatial hash.
+function nearest_plant(x: f64, z: f64, r: f64) -> i32 {
+    let cx: i32 = ((x + MAP_HALF) / HCELL) as i32
+    let cz: i32 = ((z + MAP_HALF) / HCELL) as i32
+    let reach: i32 = (r / HCELL) as i32 + 1
+    let mut best: i32 = -1
+    let mut best_d: f64 = r * r
+    for gz in cz - reach to cz + reach + 1 {
+        for gx in cx - reach to cx + reach + 1 {
+            if gx >= 0 and gz >= 0 and gx < HG and gz < HG {
+                let mut k: i32 = hash_head[gz * HG + gx]
+                while k >= 0 {
+                    if in_used[k] == 1 and in_stage[k] != ST_SEED and in_m[k] >= 0 {
+                        let dx: f64 = (in_x[k] as f64) - x
+                        let dz: f64 = (in_z[k] as f64) - z
+                        let d: f64 = dx * dx + dz * dz
+                        if d < best_d {
+                            best_d = d
+                            best = k
+                        }
+                    }
+                    k = in_next[k]
+                }
+            }
+        }
+    }
+    return best
+}
+
+function orbit_render() -> void {
+    st_plants = 0
+    st_segs = 0
+    st_leaves = 0
+    st_flowers = 0
+    o_sun()
+    let ex: f32 = orbit_eye_x() as f32
+    let ey: f32 = orbit_eye_y() as f32
+    let ez: f32 = orbit_eye_z() as f32
+    set_orbit_camera(ex, ey, ez)
+
+    # Space: black, with the same stars as the night sky.
+    r3d_set_fog(false, v3(0.0, 0.0, 0.0), 1.0, 2.0)
+    fog_near = 1.0e8
+    fog_far = 2.0e8
+    r3d_clear_gradient(v3(0.01, 0.015, 0.035), v3(0.02, 0.03, 0.06))
+    for s in 0 to N_STARS {
+        if world_pixel(ex + star_x[s] * 900.0, ey + (star_y[s] * 2.0 - 1.0) * 900.0,
+                       ez + star_z[s] * 900.0) {
+            let b: f32 = 0.45 + 0.4 * (sym_jitter(s * 5 + 3) as f32)
+            r3d_put_depth(sk_x, sk_y, 0.99999, v3(b, b, b * 1.1))
+        }
+    }
+
+    # The ground, lit by the sun, or evenly with the light off.
+    r3d_set_ambient(0.07)
+    if !sun_light { r3d_set_ambient(1.0) }
+    build_planet_mesh()
+    draw_planet_mesh(o_lx as f32, o_ly as f32, o_lz as f32)
+    r3d_set_ambient(0.42)
+
+    # The plants.
+    use_basis = true
+    let el: f64 = sqrt((ex * ex + ey * ey + ez * ez) as f64)
+    for k in 0 to n_plants {
+        if in_used[k] == 1 and in_stage[k] != ST_SEED and in_m[k] >= 0 and in_frac[k] > 0.0 {
+            let x: f64 = in_x[k] as f64
+            let z: f64 = in_z[k] as f64
+            map_dir(x, z)
+            # Only the near side.
+            let facing: f64 = (dir_x * (ex as f64) + dir_y * (ey as f64) + dir_z * (ez as f64)) / el
+            if facing > 0.02 {
+                orbit_plant(k)
+            }
+        }
+    }
+    use_basis = false
+    t_bright = 1.0
+}
+
+function orbit_plant(k: i32) -> void {
+    let m: i32 = in_m[k]
+    let x: f64 = in_x[k] as f64
+    let z: f64 = in_z[k] as f64
+    let r: f64 = surf_r(x, z)
+    let px: f32 = (dir_x * r) as f32
+    let py: f32 = (dir_y * r) as f32
+    let pz: f32 = (dir_z * r) as f32
+    # Up along the normal, east and north across it, the yaw between them.
+    let ux: f64 = dir_x
+    let uy: f64 = dir_y
+    let uz: f64 = dir_z
+    let mut exx: f64 = 0.0 - uz
+    let mut exz: f64 = ux
+    let mut el: f64 = sqrt(exx * exx + exz * exz)
+    if el < 0.0001 {
+        exx = 1.0
+        exz = 0.0
+        el = 1.0
+    }
+    exx = exx / el
+    exz = exz / el
+    let nx: f64 = uy * exz
+    let ny: f64 = uz * exx - ux * exz
+    let nz: f64 = 0.0 - uy * exx
+    let cy: f64 = in_cy[k] as f64
+    let sy: f64 = in_sy[k] as f64
+    ob_rx = (exx * cy + nx * sy) as f32
+    ob_ry = (ny * sy) as f32
+    ob_rz = (exz * cy + nz * sy) as f32
+    ob_ux = ux as f32
+    ob_uy = uy as f32
+    ob_uz = uz as f32
+    ob_fx = (nx * cy - exx * sy) as f32
+    ob_fy = (ny * cy) as f32
+    ob_fz = (nz * cy - exz * sy) as f32
+
+    let s: f32 = in_s[k] * plant_exag()
+    let h: f32 = m_h[m] * s
+    let dx: f32 = px - cam_x
+    let dy: f32 = py - cam_y
+    let dz: f32 = pz - cam_z
+    let dist: f32 = sqrtf(dx * dx + dy * dy + dz * dz)
+    let ph: f32 = h * foc * half_h / (dist + 0.5)
+    if ph < 1.0 { return }
+    set_tint(k)
+    let woody: bool = lf_kind[in_sp[k]] == K_WOODY and h > 1.2
+    if ph < 3.0 and !woody and t_flower < 0.3 { return }
+    # Sunlight where it stands.
+    let lit: f64 = ux * o_lx + uy * o_ly + uz * o_lz
+    t_bright = (0.07 + 0.93 * ramp(lit, -0.05, 0.35)) as f32
+    if !sun_light { t_bright = 1.0 }
+    st_plants = st_plants + 1
+    draw_model(m, px, py, pz, in_cy[k], in_sy[k], s, in_frac[k], in_flower[k], ph)
+}
+
+function orbit_hud(g: Gfx, seed_sp: i32, paused: bool, show_info: bool) -> void {
+    o_pick(WIN_W / 2, (HUD3_H + FOOT_Y) / 2)
+    let cx: i32 = WIN_W / 2
+    let cy: i32 = (HUD3_H + FOOT_Y) / 2
+    gfx_fill_rect(g, cx - 6, cy, 4, 1, 250, 250, 240)
+    gfx_fill_rect(g, cx + 3, cy, 4, 1, 250, 250, 240)
+    gfx_fill_rect(g, cx, cy - 6, 1, 4, 250, 250, 240)
+    gfx_fill_rect(g, cx, cy + 3, 1, 4, 250, 250, 240)
+
+    hud_title(g, "PLANET", paused)
+    let mut x: i32 = hud_int(g, 8, 28, "SEED", world_seed as i32)
+    x = hud_int(g, x, 28, "YEAR", year_num())
+    x = hud_word(g, x, 28, season_name(), "", 200, 220, 160) - 8
+    x = hud_word(g, x, 28, "TIME", time_scale_name(), 250, 210, 120)
+    x = hud_int(g, x, 28, "PLANTS", plants_alive())
+    x = hud_int(g, x, 28, "SPECIES", N_SPECIES)
+    x = hud_int(g, x, 28, "RADIUS M", planet_r() as i32)
+    x = hud_int(g, x, 28, "MS", r3d_frame_ms() as i32)
+    x = hud_wind_seed(g, x, 28, seed_sp)
+
+    if o_hit {
+        let b: i32 = biome_at(o_hx, o_hz)
+        let mut fx: i32 = 8
+        fx = fx + gfx_draw_text(g, fx, 42, biome_name(b), 1, 160, 200, 240) + 12
+        fx = hud_int(g, fx, 42, "C", (temperature(o_hx, o_hz) * 60.0 - 25.0) as i32)
+        fx = hud_int(g, fx, 42, "LAT", (lat_of(o_hz) / PI * 180.0) as i32)
+        let k: i32 = nearest_plant(o_hx, o_hz, 6.0)
+        if k >= 0 { o_focus = k }
+        if o_focus >= 0 and in_used[o_focus] == 1 {
+            let sp: i32 = in_sp[o_focus]
+            fx = fx + gfx_draw_text(g, fx, 42, species_name(sp), 1, 180, 250, 160) + 10
+            fx = fx + gfx_draw_text(g, fx, 42, stage_name(in_stage[o_focus]), 1, 250, 210, 120) + 10
+            fx = hud_int(g, fx, 42, "GENERATION", in_gen[o_focus])
+            hud_grammar(g, 56, sp)
+        }
+    } else {
+        let t: i32 = gfx_draw_text(g, 8, 42, "POINT AT THE PLANET TO READ ITS BIOMES AND PLANTS", 1,
+                                   HUD_DIM_R, HUD_DIM_G, HUD_DIM_B)
+    }
+    if show_info { draw_info(g) }
+    hud_footer(g,
+        "3 WALK THE MAP  2 FLAT  ARROWS OR DRAG TURN  W S OR WHEEL ZOOM  CLICK TO PLANT  Q E SEED  I SPECIES",
+        "- = TIME  K WEATHER  J DAY  L LIGHT  N PLANET SIZE  R NEW PLANET  P PAUSE")
+}

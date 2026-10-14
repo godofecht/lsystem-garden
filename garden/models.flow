@@ -1,0 +1,724 @@
+# Plant models: strings read by a 3D turtle into nodes, segments and
+# ornaments, cached by species and genome.
+#
+# TURTLE
+#   The turtle carries a frame: heading H, left L and up U.
+#
+#     F       draw a segment along H
+#     + -     turn about U          & ^   pitch about L
+#     / \     roll about H          |     turn around
+#     !       thin the following branches
+#
+#   Every [ rolls the frame 137.5 degrees about H, the golden-angle
+#   divergence that spreads leaves around a stem. That lifts the planar
+#   grammars written for the flat view into space, so the same strings grow
+#   in both views, and in the trees it stops successive branches all
+#   pitching the same way.
+#
+#   Tropism bends H toward the ground by the species' tropism after every
+#   segment, which is what lets a willow weep and a pine's limbs sag.
+#
+# MODELS
+#   A model is one derivation read once: nodes, segments in string order,
+#   and ornaments (leaves and flowers) tagged with the segment count at which
+#   the turtle reached them, so growth can reveal a prefix. A genome's turn
+#   angle and leaf length change the shape, so models are cached by species
+#   and those two genes, quantized. Plants that share a key share a model.
+#   Models no plant uses are dropped, and the pools are compacted when they
+#   fill.
+#
+#   Each model also keeps short index lists for drawing it small: its
+#   segments of branch order up to 3, those up to 5, and every third leaf
+#   with all its flowers. A distant plant walks only these lists, so it costs
+#   in proportion to what is drawn, while it is still its own grammar.
+
+import "./common.flow"
+import "./species.flow"
+import "./derive.flow"
+
+const MAX_MODELS: i32 = 900
+const MAX_NODES: i32 = 1600000
+const MAX_SEGS: i32 = 1600000
+const MAX_ORNS: i32 = 1100000
+const T3_STACK: i32 = 512
+const LOD_CAP: i32 = 2400000
+
+const ORN_LEAF: i32 = 1
+const ORN_BELL: i32 = 2
+const ORN_BERRY: i32 = 3
+const ORN_ROSE: i32 = 4
+const ORN_BLOOM: i32 = 10
+
+# Flowers in the 3D view are drawn larger than strict scale so they read.
+const BLOOM3: f64 = 1.7
+
+# Models. A model slot is live while m_live is 1; m_ref counts its plants.
+let mut n_models: i32 = 0
+let mut m_live: ptr<i32> = null
+let mut m_ref: ptr<i32> = null
+let mut m_sp: ptr<i32> = null
+let mut m_qa: ptr<i32> = null
+let mut m_ql: ptr<i32> = null
+let mut m_node0: ptr<i32> = null
+let mut m_nnode: ptr<i32> = null
+let mut m_seg0: ptr<i32> = null
+let mut m_nseg: ptr<i32> = null
+let mut m_orn0: ptr<i32> = null
+let mut m_norn: ptr<i32> = null
+let mut m_h: ptr<f32> = null
+let mut m_r: ptr<f32> = null
+let mut m_len: ptr<i32> = null
+# Low-detail lists: offset into lod, and the lengths of the three lists laid
+# end to end (order <= 3, order <= 5, sampled ornaments). Indices are
+# relative to the model's first segment or ornament.
+let mut m_lod0: ptr<i32> = null
+let mut m_l3: ptr<i32> = null
+let mut m_l5: ptr<i32> = null
+let mut m_lo: ptr<i32> = null
+let mut n_lod: i32 = 0
+let mut lod: ptr<i32> = null
+let mut models_built: i32 = 0
+
+# Nodes: model-space position, and the wind's bend weight.
+let mut n_nodes: i32 = 0
+let mut nd_x: ptr<f32> = null
+let mut nd_y: ptr<f32> = null
+let mut nd_z: ptr<f32> = null
+let mut nd_hf: ptr<f32> = null
+
+# Segments in string order: two nodes, a radius, a packed colour, an order.
+let mut n_segs: i32 = 0
+let mut sg_a: ptr<i32> = null
+let mut sg_b: ptr<i32> = null
+let mut sg_r: ptr<f32> = null
+let mut sg_c: ptr<i32> = null
+let mut sg_d: ptr<i32> = null
+
+# Ornaments: kind, node, the segment count when reached, size, a stable
+# jitter, the direction it points and a side vector, and a packed colour
+# (-1 means the plant's flower colour).
+let mut n_orns: i32 = 0
+let mut or_k: ptr<i32> = null
+let mut or_n: ptr<i32> = null
+let mut or_o: ptr<i32> = null
+let mut or_s: ptr<f32> = null
+let mut or_j: ptr<f32> = null
+let mut or_dx: ptr<f32> = null
+let mut or_dy: ptr<f32> = null
+let mut or_dz: ptr<f32> = null
+let mut or_sx: ptr<f32> = null
+let mut or_sy: ptr<f32> = null
+let mut or_sz: ptr<f32> = null
+let mut or_c: ptr<i32> = null
+
+# Turtle stack.
+let mut t3_px: ptr<f64> = null
+let mut t3_py: ptr<f64> = null
+let mut t3_pz: ptr<f64> = null
+let mut t3_frame: ptr<f64> = null
+let mut t3_dep: ptr<i32> = null
+let mut t3_wm: ptr<f64> = null
+let mut t3_node: ptr<i32> = null
+
+# Turtle frame, held in statics so rotations can update it in place.
+let mut hx: f64 = 0.0
+let mut hy: f64 = 1.0
+let mut hz: f64 = 0.0
+let mut lx: f64 = -1.0
+let mut ly: f64 = 0.0
+let mut lz: f64 = 0.0
+let mut ux: f64 = 0.0
+let mut uy: f64 = 0.0
+let mut uz: f64 = 1.0
+
+# Measuring pass output.
+let mut t3_top: f64 = 0.0
+let mut t3_wide: f64 = 0.0
+
+function models_alloc() -> void {
+    m_live = alloc_i32(MAX_MODELS)
+    m_ref = alloc_i32(MAX_MODELS)
+    m_sp = alloc_i32(MAX_MODELS)
+    m_qa = alloc_i32(MAX_MODELS)
+    m_ql = alloc_i32(MAX_MODELS)
+    m_node0 = alloc_i32(MAX_MODELS)
+    m_nnode = alloc_i32(MAX_MODELS)
+    m_seg0 = alloc_i32(MAX_MODELS)
+    m_nseg = alloc_i32(MAX_MODELS)
+    m_orn0 = alloc_i32(MAX_MODELS)
+    m_norn = alloc_i32(MAX_MODELS)
+    m_h = alloc_f32(MAX_MODELS)
+    m_r = alloc_f32(MAX_MODELS)
+    m_len = alloc_i32(MAX_MODELS)
+    m_lod0 = alloc_i32(MAX_MODELS)
+    m_l3 = alloc_i32(MAX_MODELS)
+    m_l5 = alloc_i32(MAX_MODELS)
+    m_lo = alloc_i32(MAX_MODELS)
+    lod = alloc_i32(LOD_CAP)
+
+    nd_x = alloc_f32(MAX_NODES)
+    nd_y = alloc_f32(MAX_NODES)
+    nd_z = alloc_f32(MAX_NODES)
+    nd_hf = alloc_f32(MAX_NODES)
+
+    sg_a = alloc_i32(MAX_SEGS)
+    sg_b = alloc_i32(MAX_SEGS)
+    sg_r = alloc_f32(MAX_SEGS)
+    sg_c = alloc_i32(MAX_SEGS)
+    sg_d = alloc_i32(MAX_SEGS)
+
+    or_k = alloc_i32(MAX_ORNS)
+    or_n = alloc_i32(MAX_ORNS)
+    or_o = alloc_i32(MAX_ORNS)
+    or_s = alloc_f32(MAX_ORNS)
+    or_j = alloc_f32(MAX_ORNS)
+    or_dx = alloc_f32(MAX_ORNS)
+    or_dy = alloc_f32(MAX_ORNS)
+    or_dz = alloc_f32(MAX_ORNS)
+    or_sx = alloc_f32(MAX_ORNS)
+    or_sy = alloc_f32(MAX_ORNS)
+    or_sz = alloc_f32(MAX_ORNS)
+    or_c = alloc_i32(MAX_ORNS)
+
+    t3_px = alloc_f64(T3_STACK)
+    t3_py = alloc_f64(T3_STACK)
+    t3_pz = alloc_f64(T3_STACK)
+    t3_frame = alloc_f64(T3_STACK * 9)
+    t3_dep = alloc_i32(T3_STACK)
+    t3_wm = alloc_f64(T3_STACK)
+    t3_node = alloc_i32(T3_STACK)
+    models_reset()
+}
+
+function models_reset() -> void {
+    n_models = 0
+    n_nodes = 0
+    n_segs = 0
+    n_orns = 0
+    n_lod = 0
+    for m in 0 to MAX_MODELS {
+        m_live[m] = 0
+        m_ref[m] = 0
+    }
+}
+
+# ---------------------------------------------------------------- frame rotations
+
+# Turn about U: H and L rotate in their plane.
+function t3_yaw(a: f64) -> void {
+    let c: f64 = cos(a * DEG)
+    let s: f64 = sin(a * DEG)
+    let nhx: f64 = hx * c + lx * s
+    let nhy: f64 = hy * c + ly * s
+    let nhz: f64 = hz * c + lz * s
+    lx = lx * c - hx * s
+    ly = ly * c - hy * s
+    lz = lz * c - hz * s
+    hx = nhx
+    hy = nhy
+    hz = nhz
+}
+
+# Pitch about L: H and U rotate. Positive pitches down, as & does.
+function t3_pitch(a: f64) -> void {
+    let c: f64 = cos(a * DEG)
+    let s: f64 = sin(a * DEG)
+    let nhx: f64 = hx * c - ux * s
+    let nhy: f64 = hy * c - uy * s
+    let nhz: f64 = hz * c - uz * s
+    ux = ux * c + hx * s
+    uy = uy * c + hy * s
+    uz = uz * c + hz * s
+    hx = nhx
+    hy = nhy
+    hz = nhz
+}
+
+# Roll about H: L and U rotate.
+function t3_roll(a: f64) -> void {
+    let c: f64 = cos(a * DEG)
+    let s: f64 = sin(a * DEG)
+    let nlx: f64 = lx * c + ux * s
+    let nly: f64 = ly * c + uy * s
+    let nlz: f64 = lz * c + uz * s
+    ux = ux * c - lx * s
+    uy = uy * c - ly * s
+    uz = uz * c - lz * s
+    lx = nlx
+    ly = nly
+    lz = nlz
+}
+
+# Bend H toward the ground by e, then rebuild an orthonormal frame.
+function t3_tropism(e: f64) -> void {
+    if e == 0.0 { return }
+    # Component of gravity (0, -1, 0) across H.
+    let d: f64 = -hy
+    let tx: f64 = 0.0 - d * hx
+    let ty: f64 = -1.0 - d * hy
+    let tz: f64 = 0.0 - d * hz
+    hx = hx + tx * e
+    hy = hy + ty * e
+    hz = hz + tz * e
+    let hn: f64 = sqrt(hx * hx + hy * hy + hz * hz)
+    hx = hx / hn
+    hy = hy / hn
+    hz = hz / hn
+    let ld: f64 = lx * hx + ly * hy + lz * hz
+    lx = lx - ld * hx
+    ly = ly - ld * hy
+    lz = lz - ld * hz
+    let ln: f64 = sqrt(lx * lx + ly * ly + lz * lz)
+    if ln < 0.000001 { return }
+    lx = lx / ln
+    ly = ly / ln
+    lz = lz / ln
+    ux = hy * lz - hz * ly
+    uy = hz * lx - hx * lz
+    uz = hx * ly - hy * lx
+}
+
+# ---------------------------------------------------------------- model building
+
+function add_node(x: f64, y: f64, z: f64) -> i32 {
+    if n_nodes >= MAX_NODES { return n_nodes - 1 }
+    nd_x[n_nodes] = x as f32
+    nd_y[n_nodes] = y as f32
+    nd_z[n_nodes] = z as f32
+    n_nodes = n_nodes + 1
+    return n_nodes - 1
+}
+
+function pack_rgb(r: i32, g: i32, b: i32) -> i32 {
+    let mut rr: i32 = r
+    let mut gg: i32 = g
+    let mut bb: i32 = b
+    if rr < 0 { rr = 0 }
+    if gg < 0 { gg = 0 }
+    if bb < 0 { bb = 0 }
+    if rr > 255 { rr = 255 }
+    if gg > 255 { gg = 255 }
+    if bb > 255 { bb = 255 }
+    return (rr << 16) | (gg << 8) | bb
+}
+
+function add_orn(kind: i32, node: i32, order: i32, size: f64, j: f64, col: i32) -> void {
+    if n_orns >= MAX_ORNS { return }
+    let o: i32 = n_orns
+    or_k[o] = kind
+    or_n[o] = node
+    or_o[o] = order
+    or_s[o] = size as f32
+    or_j[o] = j as f32
+    or_dx[o] = hx as f32
+    or_dy[o] = hy as f32
+    or_dz[o] = hz as f32
+    or_sx[o] = lx as f32
+    or_sy[o] = ly as f32
+    or_sz[o] = lz as f32
+    or_c[o] = col
+    n_orns = n_orns + 1
+}
+
+# Read string s of species sp with segment length seg. kz is the model's
+# height over its species height: radii, leaves and flowers scale with it.
+# ga and gl are the genome's multipliers on the turn angle and leaf length.
+# In measuring mode nothing is stored and t3_top / t3_wide get the extent.
+function turtle3(sp: i32, s: ptr<u8>, len: i32, seg: f64, kz: f64, ga: f64, gl: f64,
+                 measuring: bool) -> void {
+    let turn: f64 = sp_angle[sp] * ga
+    let roll: f64 = sp_roll[sp]
+    let decay: f64 = sp_decay[sp]
+    let trop: f64 = sp_trop[sp]
+    let mpp: f64 = sp_mpp(sp)
+    let rad0: f64 = sp_rad[sp] * mpp * kz
+    let leaf_len: f64 = sp_leaf[sp] * mpp * kz * gl
+    let bloom_s: f64 = mpp * BLOOM3 * kz
+    let co: i32 = sp * 9
+    let tip_style: i32 = sp_tip[sp]
+    let end_style: i32 = sp_end[sp]
+    let leaf_col: i32 = pack_rgb(sp_col[co + 6], sp_col[co + 7], sp_col[co + 8])
+
+    hx = 0.0
+    hy = 1.0
+    hz = 0.0
+    lx = -1.0
+    ly = 0.0
+    lz = 0.0
+    ux = 0.0
+    uy = 0.0
+    uz = 1.0
+    t3_yaw(sp_tilt[sp])
+
+    let mut x: f64 = 0.0
+    let mut y: f64 = 0.0
+    let mut z: f64 = 0.0
+    let mut depth: i32 = 0
+    let mut wm: f64 = 1.0
+    let mut top: i32 = 0
+    let mut drawn: i32 = 0
+    let mut node: i32 = 0
+    if !measuring { node = add_node(0.0, 0.0, 0.0) }
+    t3_top = 0.0
+    t3_wide = 0.0
+    let total: f64 = (len as f64) + 1.0
+
+    let mut i: i32 = 0
+    while i < len {
+        let c: i32 = s[i] as i32
+        let j: f64 = sym_jitter(i + 7919)
+        if c == CH_F {
+            x = x + seg * hx
+            y = y + seg * hy
+            z = z + seg * hz
+            if measuring {
+                if y > t3_top { t3_top = y }
+                let w: f64 = sqrt(x * x + z * z)
+                if w > t3_wide { t3_wide = w }
+            } else {
+                let nn: i32 = add_node(x, y, z)
+                if n_segs < MAX_SEGS {
+                    let mut t: f64 = (depth as f64) / 5.0
+                    if t > 1.0 { t = 1.0 }
+                    let r: i32 = ((sp_col[co] as f64) * (1.0 - t) + (sp_col[co + 3] as f64) * t) as i32
+                    let g: i32 = ((sp_col[co + 1] as f64) * (1.0 - t) + (sp_col[co + 4] as f64) * t) as i32
+                    let b: i32 = ((sp_col[co + 2] as f64) * (1.0 - t) + (sp_col[co + 5] as f64) * t) as i32
+                    let mut rad: f64 = rad0 * wm
+                    for d in 0 to depth { rad = rad * decay }
+                    rad = rad * (1.0 - 0.35 * (i as f64) / total)
+                    if rad < 0.003 { rad = 0.003 }
+                    sg_a[n_segs] = node
+                    sg_b[n_segs] = nn
+                    sg_r[n_segs] = rad as f32
+                    sg_c[n_segs] = pack_rgb(r, g, b)
+                    sg_d[n_segs] = depth
+                    n_segs = n_segs + 1
+                }
+                node = nn
+            }
+            drawn = drawn + 1
+            t3_tropism(trop)
+        }
+        if c == CH_PLUS { t3_yaw(turn * (1.0 + 0.35 * j)) }
+        if c == CH_MINUS { t3_yaw(0.0 - turn * (1.0 + 0.35 * j)) }
+        if c == CH_AMP { t3_pitch(turn * (1.0 + 0.25 * j)) }
+        if c == CH_CARET { t3_pitch(0.0 - turn * (1.0 + 0.25 * j)) }
+        if c == CH_SLASH { t3_roll(roll * (1.0 + 0.1 * j)) }
+        if c == CH_BSLASH { t3_roll(0.0 - roll * (1.0 + 0.1 * j)) }
+        if c == CH_PIPE { t3_yaw(180.0) }
+        if c == CH_BANG { wm = wm * 0.7 }
+        if c == CH_OPEN {
+            # The golden-angle roll lifts planar grammars into space, and in
+            # the trees it stops successive branches pitching one way.
+            t3_roll(137.5 + 12.0 * j)
+            if top < T3_STACK {
+                t3_px[top] = x
+                t3_py[top] = y
+                t3_pz[top] = z
+                let f: i32 = top * 9
+                t3_frame[f] = hx
+                t3_frame[f + 1] = hy
+                t3_frame[f + 2] = hz
+                t3_frame[f + 3] = lx
+                t3_frame[f + 4] = ly
+                t3_frame[f + 5] = lz
+                t3_frame[f + 6] = ux
+                t3_frame[f + 7] = uy
+                t3_frame[f + 8] = uz
+                t3_dep[top] = depth
+                t3_wm[top] = wm
+                t3_node[top] = node
+                top = top + 1
+            }
+            depth = depth + 1
+        }
+        if c == CH_CLOSE {
+            if !measuring and tip_style != TIP_NONE {
+                if tip_style == TIP_LEAF {
+                    add_orn(ORN_LEAF, node, drawn, leaf_len * (1.0 + 0.25 * j), j, leaf_col)
+                }
+                if tip_style == TIP_BERRY {
+                    add_orn(ORN_LEAF, node, drawn, leaf_len, j, leaf_col)
+                    if j > -0.2 { add_orn(ORN_BERRY, node, drawn, 1.9 * bloom_s, j, -1) }
+                }
+                if tip_style == TIP_ROSE {
+                    if j > 0.25 {
+                        add_orn(ORN_ROSE, node, drawn, 2.4 * bloom_s, j, -1)
+                    } else {
+                        add_orn(ORN_LEAF, node, drawn, leaf_len, j, leaf_col)
+                    }
+                }
+            }
+            if top > 0 {
+                top = top - 1
+                x = t3_px[top]
+                y = t3_py[top]
+                z = t3_pz[top]
+                let f: i32 = top * 9
+                hx = t3_frame[f]
+                hy = t3_frame[f + 1]
+                hz = t3_frame[f + 2]
+                lx = t3_frame[f + 3]
+                ly = t3_frame[f + 4]
+                lz = t3_frame[f + 5]
+                ux = t3_frame[f + 6]
+                uy = t3_frame[f + 7]
+                uz = t3_frame[f + 8]
+                depth = t3_dep[top]
+                wm = t3_wm[top]
+                node = t3_node[top]
+            }
+        }
+        if !measuring {
+            if c == CH_L {
+                let lj: i32 = (16.0 * j) as i32
+                add_orn(ORN_LEAF, node, drawn, leaf_len * (1.0 + 0.2 * j), j,
+                        pack_rgb(sp_col[co + 6] + lj, sp_col[co + 7] + lj, sp_col[co + 8]))
+            }
+            if c == CH_K {
+                let along: f64 = 1.0 - 0.55 * (i as f64) / total
+                add_orn(ORN_BELL, node, drawn, 3.8 * bloom_s * along, j, -1)
+            }
+            if c == CH_A and end_style != END_NONE {
+                add_orn(ORN_BLOOM + end_style, node, drawn, bloom_s * (1.0 + 0.12 * j), j, -1)
+            }
+        }
+        i = i + 1
+    }
+}
+
+# Derive and read one model of species sp. Returns its index.
+
+# ---------------------------------------------------------------- building
+
+# Genome keys: angle in steps of 6 percent, leaf length in steps of 10.
+function key_angle(ga: f64) -> i32 {
+    return (floor((ga - 1.0) / 0.06 + 0.5)) as i32
+}
+
+function key_leaf(gl: f64) -> i32 {
+    return (floor((gl - 1.0) / 0.10 + 0.5)) as i32
+}
+
+function pool_room() -> bool {
+    return n_nodes < MAX_NODES - 60000 and n_segs < MAX_SEGS - 60000
+           and n_orns < MAX_ORNS - 60000 and n_lod < LOD_CAP - 130000
+}
+
+function free_slot() -> i32 {
+    for m in 0 to n_models {
+        if m_live[m] == 0 { return m }
+    }
+    if n_models < MAX_MODELS {
+        n_models = n_models + 1
+        return n_models - 1
+    }
+    return -1
+}
+
+# Derive and read one model of species sp with the given genes. Returns its
+# slot, or -1 when there is no room.
+function build_model(sp: i32, ga: f64, gl: f64) -> i32 {
+    if !pool_room() { compact_models() }
+    if !pool_room() { return -1 }
+    let m: i32 = free_slot()
+    if m < 0 { return -1 }
+    let s: ptr<u8> = derive_species(sp)
+    let len: i32 = derived_len
+    let seed_state: u32 = rng_state
+
+    # Measure with unit segments, then size the model to its species height.
+    turtle3(sp, s, len, 1.0, 1.0, ga, gl, true)
+    let mut top: f64 = t3_top
+    if top < 0.5 { top = 0.5 }
+    let kz: f64 = 0.9 + 0.2 * rng_unit()
+    let seg: f64 = sp_h3[sp] * kz / top
+
+    m_live[m] = 1
+    m_ref[m] = 0
+    m_sp[m] = sp
+    m_qa[m] = key_angle(ga)
+    m_ql[m] = key_leaf(gl)
+    m_node0[m] = n_nodes
+    m_seg0[m] = n_segs
+    m_orn0[m] = n_orns
+    m_len[m] = len
+    rng_state = seed_state
+    turtle3(sp, s, len, seg, kz, ga, gl, false)
+    m_nnode[m] = n_nodes - m_node0[m]
+    m_nseg[m] = n_segs - m_seg0[m]
+    m_norn[m] = n_orns - m_orn0[m]
+    build_lod(m)
+
+    # Height fraction per node, raised to 1.5, is how far the wind moves it:
+    # the base stays planted and the tips travel furthest.
+    let mut h: f64 = 0.01
+    let mut r: f64 = 0.05
+    for k in m_node0[m] to n_nodes {
+        let yy: f64 = nd_y[k] as f64
+        if yy > h { h = yy }
+        let w: f64 = sqrt((nd_x[k] * nd_x[k] + nd_z[k] * nd_z[k]) as f64)
+        if w > r { r = w }
+    }
+    for k in m_node0[m] to n_nodes {
+        let mut f: f64 = (nd_y[k] as f64) / h
+        if f < 0.0 { f = 0.0 }
+        nd_hf[k] = (f * sqrt(f)) as f32
+    }
+    m_h[m] = h as f32
+    m_r[m] = r as f32
+    models_built = models_built + 1
+    return m
+}
+
+# A model for a plant of species sp with genes ga and gl. Plants with the
+# same key share models, with a few derivations per key for variety.
+function model_for(sp: i32, ga: f64, gl: f64) -> i32 {
+    let qa: i32 = key_angle(ga)
+    let ql: i32 = key_leaf(gl)
+    let mut same: i32 = 0
+    let mut pick: i32 = -1
+    let mut near: i32 = -1
+    let mut near_d: i32 = 1000000
+    for m in 0 to n_models {
+        if m_live[m] == 1 and m_sp[m] == sp {
+            if m_qa[m] == qa and m_ql[m] == ql {
+                same = same + 1
+                if rng_below(same) == 0 { pick = m }
+            }
+            let mut d: i32 = m_qa[m] - qa
+            if d < 0 { d = 0 - d }
+            let mut e: i32 = m_ql[m] - ql
+            if e < 0 { e = 0 - e }
+            if d + e < near_d {
+                near_d = d + e
+                near = m
+            }
+        }
+    }
+    let mut variety: i32 = 3
+    if is_tree(sp) { variety = 2 }
+    if pick >= 0 and (same >= variety or rng_below(4) != 0) { return pick }
+    let built: i32 = build_model(sp, ga, gl)
+    if built >= 0 { return built }
+    if pick >= 0 { return pick }
+    return near
+}
+
+function build_lod(m: i32) -> void {
+    m_lod0[m] = n_lod
+    let s0: i32 = m_seg0[m]
+    for i in 0 to m_nseg[m] {
+        if sg_d[s0 + i] <= 3 {
+            lod[n_lod] = i
+            n_lod = n_lod + 1
+        }
+    }
+    m_l3[m] = n_lod - m_lod0[m]
+    let mid: i32 = n_lod
+    for i in 0 to m_nseg[m] {
+        if sg_d[s0 + i] <= 5 {
+            lod[n_lod] = i
+            n_lod = n_lod + 1
+        }
+    }
+    m_l5[m] = n_lod - mid
+    let orn: i32 = n_lod
+    let o0: i32 = m_orn0[m]
+    let mut leaves: i32 = 0
+    for i in 0 to m_norn[m] {
+        let leaf: bool = or_k[o0 + i] == ORN_LEAF
+        if leaf { leaves = leaves + 1 }
+        if !leaf or leaves % 3 == 0 {
+            lod[n_lod] = i
+            n_lod = n_lod + 1
+        }
+    }
+    m_lo[m] = n_lod - orn
+}
+
+# Drop unused models and slide the live ones down so the pools are dense.
+function compact_models() -> void {
+    for m in 0 to n_models {
+        if m_live[m] == 1 and m_ref[m] <= 0 { m_live[m] = 0 }
+    }
+    # Live models in order of where their data sits.
+    let order: ptr<i32> = alloc_i32(MAX_MODELS)
+    let mut n: i32 = 0
+    for m in 0 to n_models {
+        if m_live[m] == 1 {
+            let mut k: i32 = n
+            while k > 0 and m_node0[order[k - 1]] > m_node0[m] {
+                order[k] = order[k - 1]
+                k = k - 1
+            }
+            order[k] = m
+            n = n + 1
+        }
+    }
+    let mut nn: i32 = 0
+    let mut ns: i32 = 0
+    let mut no: i32 = 0
+    let mut nl: i32 = 0
+    for q in 0 to n {
+        let m: i32 = order[q]
+        # The lists hold relative indices, so they only slide down.
+        let ln: i32 = m_l3[m] + m_l5[m] + m_lo[m]
+        for i in 0 to ln { lod[nl + i] = lod[m_lod0[m] + i] }
+        m_lod0[m] = nl
+        nl = nl + ln
+        let dn: i32 = nn - m_node0[m]
+        for i in 0 to m_nnode[m] {
+            let a: i32 = m_node0[m] + i
+            let b: i32 = nn + i
+            nd_x[b] = nd_x[a]
+            nd_y[b] = nd_y[a]
+            nd_z[b] = nd_z[a]
+            nd_hf[b] = nd_hf[a]
+        }
+        for i in 0 to m_nseg[m] {
+            let a: i32 = m_seg0[m] + i
+            let b: i32 = ns + i
+            sg_a[b] = sg_a[a] + dn
+            sg_b[b] = sg_b[a] + dn
+            sg_r[b] = sg_r[a]
+            sg_c[b] = sg_c[a]
+            sg_d[b] = sg_d[a]
+        }
+        for i in 0 to m_norn[m] {
+            let a: i32 = m_orn0[m] + i
+            let b: i32 = no + i
+            or_k[b] = or_k[a]
+            or_n[b] = or_n[a] + dn
+            or_o[b] = or_o[a]
+            or_s[b] = or_s[a]
+            or_j[b] = or_j[a]
+            or_dx[b] = or_dx[a]
+            or_dy[b] = or_dy[a]
+            or_dz[b] = or_dz[a]
+            or_sx[b] = or_sx[a]
+            or_sy[b] = or_sy[a]
+            or_sz[b] = or_sz[a]
+            or_c[b] = or_c[a]
+        }
+        m_node0[m] = nn
+        m_seg0[m] = ns
+        m_orn0[m] = no
+        nn = nn + m_nnode[m]
+        ns = ns + m_nseg[m]
+        no = no + m_norn[m]
+    }
+    n_nodes = nn
+    n_segs = ns
+    n_orns = no
+    n_lod = nl
+    free(order as ptr<void>)
+}
+
+function models_in_use() -> i32 {
+    let mut n: i32 = 0
+    for m in 0 to n_models {
+        if m_live[m] == 1 { n = n + 1 }
+    }
+    return n
+}

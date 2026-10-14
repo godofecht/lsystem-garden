@@ -1,0 +1,462 @@
+# The species table. A species is an axiom, its productions, a turn angle,
+# a generation count and a handful of drawing parameters. Nothing here
+# describes a plant's shape.
+#
+# The first fifteen are planar grammars and grow in both views. The 3D view
+# lifts them off the plane by rolling the turtle 137.5 degrees about its
+# heading at every branch, the divergence angle of phyllotaxis. The last four
+# are trees written for a 3D turtle (& ^ pitch, / \ roll, ! thins) and grow
+# only in the 3D view.
+
+import "./common.flow"
+
+# Nineteen species are written by hand. Each world adds more, generated
+# from its seed (garden/genus.flow), up to MAX_SPECIES.
+const MAX_SPECIES: i32 = 128
+const N_BASE_SPECIES: i32 = 19
+const N_FLAT_SPECIES: i32 = 15
+let mut N_SPECIES: i32 = 19
+
+const SP_OAK: i32 = 15
+const SP_PINE: i32 = 16
+const SP_BIRCH: i32 = 17
+const SP_WILLOW: i32 = 18
+
+# Tip ornaments drawn at a closing bracket.
+const TIP_NONE: i32 = 0
+const TIP_LEAF: i32 = 1
+const TIP_BERRY: i32 = 2
+const TIP_ROSE: i32 = 3
+
+# What an apex A becomes once growth reaches it.
+const END_NONE: i32 = 0
+const END_DAISY: i32 = 1
+const END_TULIP: i32 = 2
+const END_SPIKE: i32 = 3
+const END_PUFF: i32 = 4
+const END_SUN: i32 = 5
+const END_CATTAIL: i32 = 6
+const END_BUD: i32 = 7
+
+# Shared by both views.
+let mut sp_angle: ptr<f64> = null
+let mut sp_gens: ptr<i32> = null
+let mut sp_flex: ptr<f64> = null
+let mut sp_rad: ptr<f64> = null
+let mut sp_tip: ptr<i32> = null
+let mut sp_end: ptr<i32> = null
+let mut sp_leaf: ptr<f64> = null
+let mut sp_col: ptr<i32> = null
+
+# Flat view: height as a fraction of the scene, and a starting lean.
+let mut sp_height: ptr<f64> = null
+let mut sp_tilt: ptr<f64> = null
+
+# 3D view: height in metres, roll angle for / and \, radius decay per
+# branch order, tropism toward the ground, and leaf width over length.
+let mut sp_h3: ptr<f64> = null
+let mut sp_roll: ptr<f64> = null
+let mut sp_decay: ptr<f64> = null
+let mut sp_trop: ptr<f64> = null
+let mut sp_leafw: ptr<f64> = null
+
+# Whether a species is a tree: trees ignore the herb cell limit, mind only
+# woody neighbours when they sprout, and block the walker.
+let mut sp_tree: ptr<i32> = null
+
+function is_tree(sp: i32) -> bool {
+    return sp_tree[sp] == 1
+}
+
+# Generated species keep their text in one arena: a name, an axiom, the
+# rules as printed, and up to three rewritten symbols with up to four
+# productions each.
+const GTEXT_CAP: i32 = 262144
+let mut gtext: ptr<u8> = null
+let mut gtext_n: i32 = 0
+let mut g_name: ptr<i32> = null
+let mut g_axiom: ptr<i32> = null
+let mut g_rules: ptr<i32> = null
+let mut g_sym: ptr<i32> = null
+let mut g_nvar: ptr<i32> = null
+let mut g_body: ptr<i32> = null
+let mut g_flower: ptr<i32> = null
+
+function gstr(off: i32) -> string {
+    return (gtext + off) as string
+}
+
+function species_name(sp: i32) -> string {
+    if sp >= N_BASE_SPECIES { return gstr(g_name[sp]) }
+    if sp == 0 { return "BUSH" }
+    if sp == 1 { return "FERN" }
+    if sp == 2 { return "WEED" }
+    if sp == 3 { return "GRASS" }
+    if sp == 4 { return "SHRUB" }
+    if sp == 5 { return "SAPLING" }
+    if sp == 6 { return "ASTER" }
+    if sp == 7 { return "TULIP" }
+    if sp == 8 { return "LAVENDER" }
+    if sp == 9 { return "DANDELION" }
+    if sp == 10 { return "SUNFLOWER" }
+    if sp == 11 { return "CATTAIL" }
+    if sp == 12 { return "BERRY" }
+    if sp == 13 { return "ROSE" }
+    if sp == 14 { return "FOXGLOVE" }
+    if sp == 15 { return "OAK" }
+    if sp == 16 { return "PINE" }
+    if sp == 17 { return "BIRCH" }
+    return "WILLOW"
+}
+
+function species_axiom(sp: i32) -> string {
+    if sp >= N_BASE_SPECIES { return gstr(g_axiom[sp]) }
+    if sp == 3 { return "[---B][--B][-B][B][+B][++B][+++B]" }
+    if sp == 2 { return "F" }
+    if sp == 4 { return "F" }
+    if sp == 6 { return "A" }
+    if sp == 7 { return "[---L][+++L][-A][A][+A]" }
+    if sp == 8 { return "[--A][-A][A][+A][++A]" }
+    if sp == 9 { return "[---L][--L][++L][+++L][-A][+A]" }
+    if sp == 10 { return "[--L][++L]A" }
+    if sp == 11 { return "[---C][-A][A][+A][+++C][++C]" }
+    if sp == 14 { return "[--L][++L]A" }
+    if sp == SP_OAK { return "FA" }
+    if sp == SP_PINE { return "FA" }
+    if sp == SP_BIRCH { return "FFFA" }
+    if sp == SP_WILLOW { return "FFFFA" }
+    return "X"
+}
+
+# The productions as the HUD prints them.
+function species_rules(sp: i32) -> string {
+    if sp >= N_BASE_SPECIES { return gstr(g_rules[sp]) }
+    if sp == 0 { return "X->F+[[X]-X]-F[-FX]+X  F->FF" }
+    if sp == 1 { return "X->F[+X]F[-X]+X | F[-X]F[+X]-X | F[+X][-X]FX  F->FF" }
+    if sp == 2 { return "F->F[+F]F[-F][F]" }
+    if sp == 3 { return "B->FB | F+B | F-B" }
+    if sp == 4 { return "F->FF-[-F+F+F]+[+F-F-F]" }
+    if sp == 5 { return "X->F[+X][-X]FX | F[-X][+X]FX  F->FF" }
+    if sp == 6 { return "A->F[+L]F[-A]A | F[-L]F[+A]A | FF[+L]A" }
+    if sp == 7 { return "A->FA | F+A | F-A" }
+    if sp == 8 { return "A->FA | F+A | F-A" }
+    if sp == 9 { return "A->FA | F+A | F-A" }
+    if sp == 10 { return "A->FF[+L][-L]A | FF[-L][+L]A | F+F-[+L]A" }
+    if sp == 11 { return "A->FA | F+A | F-A  C->FC | F+C" }
+    if sp == 12 { return "X->F[+X]F[-X]+X | F[-X]F[+X]-X | F[+X][-X]FX  F->FF" }
+    if sp == 13 { return "X->F[+X][-X]F[+L]X | F[-X]F[+L]X  F->FF" }
+    if sp == 14 { return "A->F[+K]F[-K]A | F[-K]F[+K]A" }
+    if sp == SP_OAK { return "A->[&FL!A]/////[&FL!A]///////[&FL!A]  F->S/////F  S->F" }
+    if sp == SP_PINE { return "A->FF[&B]/[&B]/[&B]/[&B]/[&B]/A  B->F[+L][-L][&L][^L]B | F[+L][-L]B" }
+    if sp == SP_BIRCH { return "A->[&FL!A]/////[&FL!A]///////[&FL!A] | [&FL!A]///////[&FFL!A]  F->S/////F  S->F" }
+    return "A->[&FLFLA]/////[&FLFLA]///////[&FLFLA]"
+}
+
+# Number of productions for symbol c in species sp. Zero means c is copied.
+function rule_count(sp: i32, c: i32) -> i32 {
+    if sp >= N_BASE_SPECIES {
+        for i in 0 to 3 {
+            if g_sym[sp * 3 + i] == c { return g_nvar[sp * 3 + i] }
+        }
+        return 0
+    }
+    if c == 88 {
+        if sp == 0 { return 1 }
+        if sp == 1 or sp == 12 { return 3 }
+        if sp == 5 or sp == 13 { return 2 }
+        return 0
+    }
+    if c == CH_F {
+        if sp == 0 or sp == 1 or sp == 5 or sp == 12 or sp == 13 { return 1 }
+        if sp == 2 or sp == 4 { return 1 }
+        if sp == SP_OAK or sp == SP_BIRCH { return 1 }
+        return 0
+    }
+    if c == 83 {
+        if sp == SP_OAK or sp == SP_BIRCH { return 1 }
+        return 0
+    }
+    if c == CH_A {
+        if sp == 6 or sp == 10 { return 3 }
+        if sp == 7 or sp == 8 or sp == 9 or sp == 11 { return 3 }
+        if sp == 14 or sp == SP_BIRCH { return 2 }
+        if sp == SP_OAK or sp == SP_PINE or sp == SP_WILLOW { return 1 }
+        return 0
+    }
+    if c == 66 {
+        if sp == 3 { return 4 }
+        if sp == SP_PINE { return 2 }
+        return 0
+    }
+    if c == 67 {
+        if sp == 11 { return 3 }
+        return 0
+    }
+    return 0
+}
+
+function rule_body(sp: i32, c: i32, v: i32) -> string {
+    if sp >= N_BASE_SPECIES {
+        for i in 0 to 3 {
+            if g_sym[sp * 3 + i] == c { return gstr(g_body[(sp * 3 + i) * 4 + v]) }
+        }
+        return "F"
+    }
+    if c == CH_F {
+        if sp == 2 { return "F[+F]F[-F][F]" }
+        if sp == 4 { return "FF-[-F+F+F]+[+F-F-F]" }
+        if sp == SP_OAK or sp == SP_BIRCH { return "S/////F" }
+        return "FF"
+    }
+    if c == 83 {
+        return "F"
+    }
+    if c == 88 {
+        if sp == 0 { return "F+[[X]-X]-F[-FX]+X" }
+        if sp == 5 {
+            if v == 0 { return "F[+X][-X]FX" }
+            return "F[-X][+X]FX"
+        }
+        if sp == 13 {
+            if v == 0 { return "F[+X][-X]F[+L]X" }
+            return "F[-X]F[+L]X"
+        }
+        if v == 0 { return "F[+X]F[-X]+X" }
+        if v == 1 { return "F[-X]F[+X]-X" }
+        return "F[+X][-X]FX"
+    }
+    if c == CH_A {
+        if sp == 6 {
+            if v == 0 { return "F[+L]F[-A]A" }
+            if v == 1 { return "F[-L]F[+A]A" }
+            return "FF[+L]A"
+        }
+        if sp == 10 {
+            if v == 0 { return "FF[+L][-L]A" }
+            if v == 1 { return "FF[-L][+L]A" }
+            return "F+F-[+L]A"
+        }
+        if sp == 14 {
+            if v == 0 { return "F[+K]F[-K]A" }
+            return "F[-K]F[+K]A"
+        }
+        if sp == SP_OAK { return "[&FL!A]/////[&FL!A]///////[&FL!A]" }
+        if sp == SP_BIRCH {
+            if v == 0 { return "[&FL!A]/////[&FL!A]///////[&FL!A]" }
+            return "[&FL!A]///////[&FFL!A]"
+        }
+        if sp == SP_PINE { return "FF[&B]/[&B]/[&B]/[&B]/[&B]/A" }
+        if sp == SP_WILLOW { return "[&FLFLA]/////[&FLFLA]///////[&FLFLA]" }
+        if v == 0 { return "FA" }
+        if v == 1 { return "F+A" }
+        return "F-A"
+    }
+    if c == 66 {
+        if sp == SP_PINE {
+            if v == 0 { return "F[+L][-L][&L][^L]B" }
+            return "F[+L][-L]B"
+        }
+        if v == 1 { return "F+B" }
+        if v == 2 { return "F-B" }
+        return "FB"
+    }
+    if v == 0 { return "FC" }
+    return "F+C"
+}
+
+# Stem colour at the base, the colour the stem shifts to with branch order,
+# and the leaf colour.
+function set_species_col(sp: i32, r0: i32, g0: i32, b0: i32,
+                         r1: i32, g1: i32, b1: i32,
+                         lr: i32, lg: i32, lb: i32) -> void {
+    let o: i32 = sp * 9
+    sp_col[o] = r0
+    sp_col[o + 1] = g0
+    sp_col[o + 2] = b0
+    sp_col[o + 3] = r1
+    sp_col[o + 4] = g1
+    sp_col[o + 5] = b1
+    sp_col[o + 6] = lr
+    sp_col[o + 7] = lg
+    sp_col[o + 8] = lb
+}
+
+function set_species(sp: i32, angle: f64, gens: i32, height: f64, flex: f64,
+                     rad: f64, tilt: f64, tip: i32, end: i32, leaf: f64) -> void {
+    sp_angle[sp] = angle
+    sp_gens[sp] = gens
+    sp_height[sp] = height
+    sp_flex[sp] = flex
+    sp_rad[sp] = rad
+    sp_tilt[sp] = tilt
+    sp_tip[sp] = tip
+    sp_end[sp] = end
+    sp_leaf[sp] = leaf
+}
+
+function set_species3(sp: i32, h3: f64, roll: f64, decay: f64, trop: f64,
+                      leafw: f64) -> void {
+    sp_h3[sp] = h3
+    sp_roll[sp] = roll
+    sp_decay[sp] = decay
+    sp_trop[sp] = trop
+    sp_leafw[sp] = leafw
+}
+
+# Metres per flat-view pixel for a species. Radii, leaves and flowers are
+# given in flat-view pixels; this carries them into the 3D view in proportion.
+function sp_mpp(sp: i32) -> f64 {
+    return sp_h3[sp] / (sp_height[sp] * 510.0)
+}
+
+function define_species() -> void {
+    sp_angle = alloc_f64(MAX_SPECIES)
+    sp_gens = alloc_i32(MAX_SPECIES)
+    sp_height = alloc_f64(MAX_SPECIES)
+    sp_flex = alloc_f64(MAX_SPECIES)
+    sp_rad = alloc_f64(MAX_SPECIES)
+    sp_tilt = alloc_f64(MAX_SPECIES)
+    sp_tip = alloc_i32(MAX_SPECIES)
+    sp_end = alloc_i32(MAX_SPECIES)
+    sp_leaf = alloc_f64(MAX_SPECIES)
+    sp_col = alloc_i32(MAX_SPECIES * 9)
+    sp_h3 = alloc_f64(MAX_SPECIES)
+    sp_roll = alloc_f64(MAX_SPECIES)
+    sp_decay = alloc_f64(MAX_SPECIES)
+    sp_trop = alloc_f64(MAX_SPECIES)
+    sp_leafw = alloc_f64(MAX_SPECIES)
+    sp_tree = alloc_i32(MAX_SPECIES)
+    for sp in 0 to MAX_SPECIES { sp_tree[sp] = 0 }
+    sp_tree[SP_OAK] = 1
+    sp_tree[SP_PINE] = 1
+    sp_tree[SP_BIRCH] = 1
+    sp_tree[SP_WILLOW] = 1
+    gtext = alloc_u8(GTEXT_CAP)
+    g_name = alloc_i32(MAX_SPECIES)
+    g_axiom = alloc_i32(MAX_SPECIES)
+    g_rules = alloc_i32(MAX_SPECIES)
+    g_sym = alloc_i32(MAX_SPECIES * 3)
+    g_nvar = alloc_i32(MAX_SPECIES * 3)
+    g_body = alloc_i32(MAX_SPECIES * 12)
+    g_flower = alloc_i32(MAX_SPECIES)
+
+    #           angle gens height flex  rad  tilt  tip        end          leaf
+    set_species(0, 22.5, 5, 0.62, 5.0, 2.4, 14.0, TIP_LEAF, END_NONE, 4.0)
+    set_species(1, 13.0, 6, 0.72, 7.0, 2.0, 0.0, TIP_LEAF, END_NONE, 4.0)
+    set_species(2, 20.0, 4, 0.46, 9.0, 1.4, 0.0, TIP_LEAF, END_NONE, 3.5)
+    set_species(3, 6.0, 8, 0.22, 16.0, 0.8, 0.0, TIP_NONE, END_NONE, 0.0)
+    set_species(4, 22.5, 4, 0.38, 4.0, 1.7, 0.0, TIP_LEAF, END_NONE, 3.0)
+    set_species(5, 25.7, 6, 0.86, 3.0, 3.4, 0.0, TIP_LEAF, END_NONE, 4.5)
+    set_species(6, 28.0, 5, 0.34, 9.0, 1.0, 0.0, TIP_NONE, END_DAISY, 6.0)
+    set_species(7, 10.0, 5, 0.30, 8.0, 1.3, 0.0, TIP_NONE, END_TULIP, 20.0)
+    set_species(8, 9.0, 7, 0.30, 10.0, 0.8, 0.0, TIP_NONE, END_SPIKE, 0.0)
+    set_species(9, 8.0, 6, 0.24, 10.0, 0.9, 0.0, TIP_NONE, END_PUFF, 13.0)
+    set_species(10, 32.0, 5, 0.78, 8.0, 2.6, 0.0, TIP_NONE, END_SUN, 13.0)
+    set_species(11, 7.0, 9, 0.56, 12.0, 1.1, 0.0, TIP_NONE, END_CATTAIL, 0.0)
+    set_species(12, 24.0, 5, 0.40, 5.0, 1.9, 0.0, TIP_BERRY, END_NONE, 4.0)
+    set_species(13, 30.0, 5, 0.50, 4.0, 1.7, 0.0, TIP_ROSE, END_NONE, 5.5)
+    set_species(14, 34.0, 6, 0.58, 7.0, 1.7, 0.0, TIP_NONE, END_BUD, 16.0)
+    set_species(SP_OAK, 30.0, 6, 1.0, 2.0, 18.0, 0.0, TIP_NONE, END_NONE, 30.0)
+    set_species(SP_PINE, 78.0, 10, 1.0, 1.6, 8.0, 0.0, TIP_NONE, END_NONE, 30.0)
+    set_species(SP_BIRCH, 17.0, 7, 1.0, 3.0, 10.7, 0.0, TIP_NONE, END_NONE, 24.0)
+    set_species(SP_WILLOW, 34.0, 5, 1.0, 4.0, 12.0, 0.0, TIP_NONE, END_NONE, 22.0)
+
+    #            metres  roll   decay trop  leaf width
+    set_species3(0, 1.3, 137.5, 0.72, 0.0, 0.45)
+    set_species3(1, 1.1, 137.5, 0.72, 0.0, 0.45)
+    set_species3(2, 0.7, 137.5, 0.72, 0.0, 0.45)
+    set_species3(3, 0.32, 137.5, 1.0, 0.0, 0.45)
+    set_species3(4, 1.0, 137.5, 0.72, 0.0, 0.45)
+    set_species3(5, 4.5, 137.5, 0.72, 0.0, 0.45)
+    set_species3(6, 0.65, 137.5, 0.72, 0.0, 0.45)
+    set_species3(7, 0.5, 137.5, 0.72, 0.0, 0.30)
+    set_species3(8, 0.6, 137.5, 0.72, 0.0, 0.45)
+    set_species3(9, 0.32, 137.5, 0.72, 0.0, 0.30)
+    set_species3(10, 2.2, 137.5, 0.72, 0.0, 0.55)
+    set_species3(11, 1.6, 137.5, 0.72, 0.0, 0.45)
+    set_species3(12, 1.1, 137.5, 0.72, 0.0, 0.45)
+    set_species3(13, 1.2, 137.5, 0.72, 0.0, 0.45)
+    set_species3(14, 1.3, 137.5, 0.72, 0.0, 0.40)
+    set_species3(SP_OAK, 10.0, 22.5, 1.0, 0.0, 0.55)
+    set_species3(SP_PINE, 11.0, 67.0, 0.45, 0.05, 0.35)
+    set_species3(SP_BIRCH, 9.5, 22.5, 1.0, 0.02, 0.50)
+    set_species3(SP_WILLOW, 8.0, 22.5, 0.74, 0.30, 0.14)
+
+    #               stem base       stem tip        leaf
+    set_species_col(0, 112, 84, 56, 70, 140, 60, 84, 178, 82)
+    set_species_col(1, 70, 110, 52, 96, 196, 92, 96, 206, 100)
+    set_species_col(2, 92, 120, 60, 130, 186, 84, 140, 200, 90)
+    set_species_col(3, 74, 132, 58, 150, 214, 104, 150, 214, 104)
+    set_species_col(4, 96, 80, 60, 66, 128, 74, 70, 150, 82)
+    set_species_col(5, 104, 76, 50, 120, 96, 62, 104, 186, 72)
+    set_species_col(6, 70, 128, 64, 92, 160, 80, 90, 170, 84)
+    set_species_col(7, 78, 150, 82, 92, 168, 92, 82, 160, 96)
+    set_species_col(8, 96, 132, 100, 120, 150, 120, 120, 160, 120)
+    set_species_col(9, 110, 150, 70, 130, 170, 84, 96, 170, 70)
+    set_species_col(10, 96, 140, 64, 112, 156, 70, 88, 160, 64)
+    set_species_col(11, 92, 128, 72, 110, 148, 84, 110, 148, 84)
+    set_species_col(12, 98, 70, 60, 120, 82, 70, 64, 140, 76)
+    set_species_col(13, 74, 100, 56, 90, 130, 62, 70, 140, 70)
+    set_species_col(14, 82, 124, 70, 100, 150, 84, 88, 150, 84)
+    set_species_col(SP_OAK, 96, 72, 52, 84, 70, 52, 74, 136, 52)
+    set_species_col(SP_PINE, 92, 66, 46, 74, 60, 42, 52, 112, 62)
+    set_species_col(SP_BIRCH, 226, 222, 210, 150, 140, 122, 134, 184, 72)
+    set_species_col(SP_WILLOW, 112, 98, 66, 124, 140, 74, 146, 186, 92)
+}
+
+function pack3(r: i32, g: i32, b: i32) -> i32 {
+    let mut rr: i32 = r
+    let mut gg: i32 = g
+    let mut bb: i32 = b
+    if rr < 0 { rr = 0 }
+    if gg < 0 { gg = 0 }
+    if bb < 0 { bb = 0 }
+    if rr > 255 { rr = 255 }
+    if gg > 255 { gg = 255 }
+    if bb > 255 { bb = 255 }
+    return (rr << 16) | (gg << 8) | bb
+}
+
+# A flower colour drawn from each species' palette.
+function pick_flower(sp: i32) -> i32 {
+    let k: i32 = rng_below(4)
+    if sp >= N_BASE_SPECIES {
+        # A generated species varies its flower around one colour.
+        let c: i32 = g_flower[sp]
+        let d: i32 = (k - 1) * 18
+        return pack3(col_r(c) + d, col_g(c) - d / 2, col_b(c) + d / 3)
+    }
+    if sp == 6 {
+        if k == 0 { return 0xF4F0F8 }
+        if k == 1 { return 0xC9A0E8 }
+        if k == 2 { return 0xF2A6C8 }
+        return 0x9DB4F5
+    }
+    if sp == 7 {
+        if k == 0 { return 0xE8343C }
+        if k == 1 { return 0xF5C431 }
+        if k == 2 { return 0xF07A2A }
+        return 0xF086B4
+    }
+    if sp == 13 {
+        if k == 0 { return 0xD2203A }
+        if k == 1 { return 0xF07C98 }
+        if k == 2 { return 0xF6E0C8 }
+        return 0xB01848
+    }
+    if sp == 14 {
+        if k == 0 { return 0xD860B0 }
+        if k == 1 { return 0xB070D8 }
+        if k == 2 { return 0xF0B0D8 }
+        return 0xF2F0F4
+    }
+    if sp == 8 { return 0x9878D8 }
+    if sp == 9 { return 0xECEEE8 }
+    if sp == 10 { return 0xF6C622 }
+    if sp == 11 { return 0x6A4428 }
+    if sp == 12 {
+        if k < 2 { return 0xD02838 }
+        return 0x3A3A9A
+    }
+    return 0xF0F0F0
+}

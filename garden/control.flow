@@ -1,0 +1,80 @@
+# Conditions the page (or the keys) can set while the garden runs.
+#
+# The web page calls garden_set(key, value) and garden_get(key) through the
+# WebAssembly exports, so its sliders change the running world and follow
+# it when the weather is automatic.
+#
+#   0 rain          -1 automatic weather, else 0 (dry) to 1 (storm)
+#   1 wind          -1 the wind key's level, else 0 to 3.4
+#   2 day length    seconds of real time per day; 0 holds the hour
+#   3 hour          time of day, 0 to 1 (midnight to midnight)
+#   4 time speed    index 0..12 (x0.25 to x1024)
+#   5 run           1 while held
+#   6 look x        pixels of mouse movement to turn by (captured mouse)
+#   7 look y
+#   8 plant         1 plants the chosen seed at the crosshair
+#  10 captured      1 while the page holds the mouse (pointer lock)
+#  11 map size      256, 512 or 1024 metres, used by the next world
+#  12 world         0 a map to walk, 1 a planet to orbit, used by the next world
+#  13 new world     grow a new world now; a positive value is its seed
+#  14 light         1 sunlight with day and night, 0 even light everywhere
+
+import "./common.flow"
+import "./calendar.flow"
+import "./sky.flow"
+
+let mut ctl_run: bool = false
+let mut ctl_look_x: f64 = 0.0
+let mut ctl_look_y: f64 = 0.0
+let mut ctl_plant: bool = false
+let mut ctl_captured: bool = false
+let mut ctl_map_size: f64 = 0.0
+let mut ctl_world: i32 = -1
+let mut ctl_regen: f64 = -1.0
+
+@flow_api
+export function garden_set(key: i32, value: f64) -> i32 {
+    if key == 0 {
+        if value < 0.0 {
+            rain_auto = true
+            weather_timer = 0.0
+        } else {
+            rain_auto = false
+            rain_target = clamp01(value)
+        }
+    }
+    if key == 1 { wind_override = value }
+    if key == 2 { day_len = value }
+    if key == 3 { tod = clamp01(value) }
+    if key == 4 {
+        let mut v: i32 = value as i32
+        if v < 0 { v = 0 }
+        if v > MAX_TIME_LEVEL { v = MAX_TIME_LEVEL }
+        time_level = v
+    }
+    if key == 5 { ctl_run = value > 0.5 }
+    if key == 6 { ctl_look_x = ctl_look_x + value }
+    if key == 7 { ctl_look_y = ctl_look_y + value }
+    if key == 8 { ctl_plant = true }
+    if key == 10 { ctl_captured = value > 0.5 }
+    if key == 11 { ctl_map_size = value }
+    if key == 12 { ctl_world = value as i32 }
+    if key == 13 { ctl_regen = value }
+    if key == 14 { sun_light = value > 0.5 }
+    return 0
+}
+
+@flow_api
+export function garden_get(key: i32) -> f64 {
+    if key == 0 { return rain }
+    if key == 1 {
+        if wind_override >= 0.0 { return wind_override }
+        return wind_amp()
+    }
+    if key == 2 { return day_len }
+    if key == 3 { return tod }
+    if key == 4 { return time_level as f64 }
+    if key == 9 { if rain_auto { return 1.0 } return 0.0 }
+    if key == 14 { if sun_light { return 1.0 } return 0.0 }
+    return 0.0
+}

@@ -1,0 +1,67 @@
+# Parallel rewriting. Every symbol of the string is replaced at once, which
+# is what makes an L-system: growth is simultaneous across the organism.
+
+import "./common.flow"
+import "./species.flow"
+
+const DERIVE_CAP: i32 = 196608
+
+let mut tmp_a: ptr<u8> = null
+let mut tmp_b: ptr<u8> = null
+
+function derive_init() -> void {
+    tmp_a = alloc_u8(DERIVE_CAP)
+    tmp_b = alloc_u8(DERIVE_CAP)
+}
+
+function emit(dst: ptr<u8>, len: i32, c: i32) -> i32 {
+    if len >= DERIVE_CAP { return len }
+    dst[len] = c as u8
+    return len + 1
+}
+
+function emit_str(dst: ptr<u8>, len0: i32, s: string) -> i32 {
+    let b: ptr<u8> = s as ptr<u8>
+    let mut len: i32 = len0
+    let mut i: i32 = 0
+    while b[i] != 0 {
+        len = emit(dst, len, b[i] as i32)
+        i = i + 1
+    }
+    return len
+}
+
+# One rewrite of every symbol in src. A symbol with several productions
+# picks one at random, which makes the grammar stochastic.
+function derive_step(sp: i32, src: ptr<u8>, dst: ptr<u8>, len: i32) -> i32 {
+    let mut out: i32 = 0
+    for i in 0 to len {
+        let c: i32 = src[i] as i32
+        let n: i32 = rule_count(sp, c)
+        if n > 0 {
+            out = emit_str(dst, out, rule_body(sp, c, rng_below(n)))
+        } else {
+            out = emit(dst, out, c)
+        }
+    }
+    return out
+}
+
+# Derive species sp from its axiom for its generation count. Returns the
+# string, which stays valid until the next call.
+let mut derived_len: i32 = 0
+
+function derive_species(sp: i32) -> ptr<u8> {
+    let mut len: i32 = emit_str(tmp_a, 0, species_axiom(sp))
+    let gens: i32 = sp_gens[sp]
+    for it in 0 to gens {
+        if it % 2 == 0 {
+            len = derive_step(sp, tmp_a, tmp_b, len)
+        } else {
+            len = derive_step(sp, tmp_b, tmp_a, len)
+        }
+    }
+    derived_len = len
+    if gens % 2 == 1 { return tmp_b }
+    return tmp_a
+}

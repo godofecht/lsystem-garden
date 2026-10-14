@@ -1,0 +1,98 @@
+# Seeded value noise and fractal sums of it, for terrain and moisture.
+
+import "./common.flow"
+
+# A hash of an integer lattice point and a seed, in [0, 1).
+function lattice(ix: i32, iz: i32, seed: u32) -> f64 {
+    let mut h: u32 = (ix as u32) * 374761393 + (iz as u32) * 668265263 + seed * 2246822519
+    h = (h ^ (h >> 13)) * 1274126177
+    h = h ^ (h >> 16)
+    return ((h >> 8) as f64) / 16777216.0
+}
+
+function smooth(t: f64) -> f64 {
+    return t * t * (3.0 - 2.0 * t)
+}
+
+function value_noise(x: f64, z: f64, seed: u32) -> f64 {
+    let fx: f64 = floor(x)
+    let fz: f64 = floor(z)
+    let ix: i32 = fx as i32
+    let iz: i32 = fz as i32
+    let tx: f64 = smooth(x - fx)
+    let tz: f64 = smooth(z - fz)
+    let a: f64 = lattice(ix, iz, seed)
+    let b: f64 = lattice(ix + 1, iz, seed)
+    let c: f64 = lattice(ix, iz + 1, seed)
+    let d: f64 = lattice(ix + 1, iz + 1, seed)
+    let ab: f64 = a + (b - a) * tx
+    let cd: f64 = c + (d - c) * tx
+    return ab + (cd - ab) * tz
+}
+
+# Octaves of value noise, each at twice the frequency and half the weight.
+# Returns roughly [0, 1].
+function fbm(x: f64, z: f64, seed: u32, octaves: i32) -> f64 {
+    let mut sum: f64 = 0.0
+    let mut amp: f64 = 0.5
+    let mut freq: f64 = 1.0
+    let mut norm: f64 = 0.0
+    for k in 0 to octaves {
+        sum = sum + amp * value_noise(x * freq, z * freq, seed + (k as u32) * 1013)
+        norm = norm + amp
+        amp = amp * 0.5
+        freq = freq * 2.03
+    }
+    return sum / norm
+}
+
+# The same on a 3D lattice, for the planet: noise sampled at points on a
+# sphere has no seam and no pinch at the poles.
+function lattice3(ix: i32, iy: i32, iz: i32, seed: u32) -> f64 {
+    let mut h: u32 = (ix as u32) * 374761393 + (iy as u32) * 1442695041 + (iz as u32) * 668265263
+                     + seed * 2246822519
+    h = (h ^ (h >> 13)) * 1274126177
+    h = h ^ (h >> 16)
+    return ((h >> 8) as f64) / 16777216.0
+}
+
+function value_noise3(x: f64, y: f64, z: f64, seed: u32) -> f64 {
+    let fx: f64 = floor(x)
+    let fy: f64 = floor(y)
+    let fz: f64 = floor(z)
+    let ix: i32 = fx as i32
+    let iy: i32 = fy as i32
+    let iz: i32 = fz as i32
+    let tx: f64 = smooth(x - fx)
+    let ty: f64 = smooth(y - fy)
+    let tz: f64 = smooth(z - fz)
+    let a0: f64 = lattice3(ix, iy, iz, seed)
+    let a1: f64 = lattice3(ix + 1, iy, iz, seed)
+    let a2: f64 = lattice3(ix, iy + 1, iz, seed)
+    let a3: f64 = lattice3(ix + 1, iy + 1, iz, seed)
+    let b0: f64 = lattice3(ix, iy, iz + 1, seed)
+    let b1: f64 = lattice3(ix + 1, iy, iz + 1, seed)
+    let b2: f64 = lattice3(ix, iy + 1, iz + 1, seed)
+    let b3: f64 = lattice3(ix + 1, iy + 1, iz + 1, seed)
+    let a01: f64 = a0 + (a1 - a0) * tx
+    let a23: f64 = a2 + (a3 - a2) * tx
+    let b01: f64 = b0 + (b1 - b0) * tx
+    let b23: f64 = b2 + (b3 - b2) * tx
+    let a: f64 = a01 + (a23 - a01) * ty
+    let b: f64 = b01 + (b23 - b01) * ty
+    return a + (b - a) * tz
+}
+
+function fbm3(x: f64, y: f64, z: f64, seed: u32, octaves: i32) -> f64 {
+    let mut sum: f64 = 0.0
+    let mut amp: f64 = 0.5
+    let mut freq: f64 = 1.0
+    let mut norm: f64 = 0.0
+    for k in 0 to octaves {
+        sum = sum + amp * value_noise3(x * freq, y * freq, z * freq, seed + (k as u32) * 1013)
+        norm = norm + amp
+        amp = amp * 0.5
+        freq = freq * 2.03
+    }
+    return sum / norm
+}

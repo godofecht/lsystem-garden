@@ -1,0 +1,132 @@
+# Shared by every part of the garden: window layout, the symbol alphabet,
+# key codes, the random source and small allocation helpers.
+
+import "stdlib/gfx.flow"
+
+extern {
+    function sin(x: f64) -> f64
+    function cos(x: f64) -> f64
+    function sqrt(x: f64) -> f64
+    function floor(x: f64) -> f64
+    function malloc(size: i64) -> ptr<void>
+    function free(p: ptr<void>) -> void
+    function log(x: f64) -> f64
+    function exp(x: f64) -> f64
+    function getenv(name: string) -> ptr<u8>
+    function atoi(s: ptr<u8>) -> i32
+    function time(t: ptr<void>) -> i64
+    function atan2(y: f64, x: f64) -> f64
+}
+
+const WIN_W: i32 = 960
+const WIN_H: i32 = 640
+const HUD_H: i32 = 58
+const FOOT_Y: i32 = 608
+
+const DEG: f64 = 0.017453292519943295
+const PI: f64 = 3.141592653589793
+
+# The alphabet. Anything else is a growth symbol: rewritten, never drawn.
+const CH_F: i32 = 70
+const CH_PLUS: i32 = 43
+const CH_MINUS: i32 = 45
+const CH_OPEN: i32 = 91
+const CH_CLOSE: i32 = 93
+const CH_L: i32 = 76
+const CH_K: i32 = 75
+const CH_A: i32 = 65
+const CH_AMP: i32 = 38
+const CH_CARET: i32 = 94
+const CH_SLASH: i32 = 47
+const CH_BSLASH: i32 = 92
+const CH_BANG: i32 = 33
+const CH_PIPE: i32 = 124
+
+# macOS key codes beyond the ones stdlib/gfx.flow names.
+const KEY_P: i32 = 35
+const KEY_Q: i32 = 12
+const KEY_E: i32 = 14
+const KEY_M: i32 = 46
+const KEY_TAB: i32 = 48
+const KEY_SHIFT: i32 = 56
+const KEY_2: i32 = 19
+const KEY_3: i32 = 20
+
+let mut rng_state: u32 = 14101926
+
+function rng_next() -> u32 {
+    rng_state = rng_state * 1664525 + 1013904223
+    return rng_state
+}
+
+function rng_below(n: i32) -> i32 {
+    return ((rng_next() >> 13) % (n as u32)) as i32
+}
+
+function rng_unit() -> f64 {
+    return ((rng_next() >> 8) as f64) / 16777216.0
+}
+
+# Roughly normal with mean 0 and deviation 1: a sum of three uniforms.
+function rng_gauss() -> f64 {
+    return (rng_unit() + rng_unit() + rng_unit() - 1.5) * 2.0
+}
+
+# A stable hash per symbol index in [-1, 1]: the same plant redraws
+# identically every frame, so growth and wind are the only things that move.
+function sym_jitter(i: i32) -> f64 {
+    let mut h: u32 = (i as u32) * 2654435761
+    h = h ^ (h >> 15)
+    h = h * 2246822519
+    h = h ^ (h >> 13)
+    let bits: i32 = ((h >> 8) % 2048) as i32
+    return (bits as f64) / 1024.0 - 1.0
+}
+
+function col_r(c: i32) -> i32 { return (c >> 16) & 255 }
+function col_g(c: i32) -> i32 { return (c >> 8) & 255 }
+function col_b(c: i32) -> i32 { return c & 255 }
+
+function alloc_f64(n: i32) -> ptr<f64> {
+    return malloc((n as i64) * 8) as ptr<f64>
+}
+
+function alloc_f32(n: i32) -> ptr<f32> {
+    return malloc((n as i64) * 4) as ptr<f32>
+}
+
+function alloc_i32(n: i32) -> ptr<i32> {
+    return malloc((n as i64) * 4) as ptr<i32>
+}
+
+function alloc_u8(n: i32) -> ptr<u8> {
+    return malloc(n as i64) as ptr<u8>
+}
+
+# Wind strength for a level: CALM, BREEZE, GUSTY, GALE.
+let mut wind_level: i32 = 1
+let mut wind_time: f64 = 0.0
+
+function wind_name(level: i32) -> string {
+    if level == 0 { return "CALM" }
+    if level == 1 { return "BREEZE" }
+    if level == 2 { return "GUSTY" }
+    return "GALE"
+}
+
+# Set from the page's wind slider; negative means use wind_level.
+let mut wind_override: f64 = -1.0
+
+function wind_amp() -> f64 {
+    if wind_override >= 0.0 { return wind_override }
+    if wind_level == 0 { return 0.15 }
+    if wind_level == 1 { return 1.0 }
+    if wind_level == 2 { return 2.0 }
+    return 3.4
+}
+
+# A travelling wave: gusts visibly move across the garden along +x.
+function wind_wave(x: f64) -> f64 {
+    let t: f64 = wind_time
+    return 0.55 + 0.45 * sin(0.9 * t - x * 0.008) + 0.22 * sin(2.7 * t + x * 0.021)
+}

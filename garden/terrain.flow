@@ -1,0 +1,419 @@
+# The land, generated from the world seed, in one of two shapes.
+#
+# MAP
+#   A square 256, 512 or 1024 m across, of hills, lakes and a mountain rim.
+#
+# PLANET
+#   A small world. The same grid is read as longitude and latitude and
+#   wrapped onto a sphere, and the noise is sampled at points on that
+#   sphere so there is no seam. Its biomes are exaggerated on purpose: ice
+#   caps, tundra, boreal belts, temperate bands, deserts near 25 degrees and
+#   a wet equator.
+#
+# FIELDS
+#   height       fractal noise and ridges; the water level is set so a share
+#                of the land is under water, and heights are stored above it
+#   moisture     noise blended with a blurred map of the water, so shores are
+#                wet and hilltops dry; on the planet also latitude bands
+#   temperature  0 (polar) to 1 (tropical): a gradient across the map, or
+#                latitude on the planet, cooler with height. The season adds
+#                to it (season_warmth), so a temperate place freezes in
+#                winter and a cold one barely thaws.
+#
+# BIOMES
+#   Height, moisture and temperature name the ground: ocean, shore, wetland,
+#   ice, tundra, alpine, boreal forest, cold steppe, temperate forest,
+#   grassland, scrub, desert, savanna, jungle. Biomes colour the ground, and
+#   plants read the same fields to decide where they can live and how well.
+
+import "./common.flow"
+import "./noise.flow"
+import "./calendar.flow"
+import "./sky.flow"
+
+const TN: i32 = 257
+
+const WORLD_MAP: i32 = 0
+const WORLD_PLANET: i32 = 1
+
+const B_OCEAN: i32 = 0
+const B_SHORE: i32 = 1
+const B_WETLAND: i32 = 2
+const B_ICE: i32 = 3
+const B_TUNDRA: i32 = 4
+const B_ALPINE: i32 = 5
+const B_BOREAL: i32 = 6
+const B_STEPPE: i32 = 7
+const B_TEMPERATE: i32 = 8
+const B_GRASSLAND: i32 = 9
+const B_SCRUB: i32 = 10
+const B_DESERT: i32 = 11
+const B_SAVANNA: i32 = 12
+const B_JUNGLE: i32 = 13
+
+let mut world_kind: i32 = 0
+let mut map_size: f64 = 512.0
+let mut MAP_HALF: f64 = 256.0
+let mut TSTEP: f64 = 2.0
+
+let mut world_seed: u32 = 1
+let mut th: ptr<f64> = null
+let mut tm: ptr<f64> = null
+let mut tt: ptr<f64> = null
+let mut tw: ptr<f64> = null
+
+function terrain_alloc() -> void {
+    th = alloc_f64(TN * TN)
+    tm = alloc_f64(TN * TN)
+    tt = alloc_f64(TN * TN)
+    tw = alloc_f64(TN * TN)
+}
+
+function smoothstep(a: f64, b: f64, x: f64) -> f64 {
+    let t: f64 = ramp(x, a, b)
+    return t * t * (3.0 - 2.0 * t)
+}
+
+# Planet radius in metres: the map's width is the equator.
+function planet_r() -> f64 {
+    return map_size / (2.0 * PI)
+}
+
+# Longitude and latitude of map point (x, z) on the planet.
+function lon_of(x: f64) -> f64 {
+    return x / MAP_HALF * PI
+}
+
+function lat_of(z: f64) -> f64 {
+    return z / MAP_HALF * PI * 0.5 * 0.94
+}
+
+function set_map_size(size: f64) -> void {
+    map_size = size
+    MAP_HALF = size * 0.5
+    TSTEP = size / ((TN - 1) as f64)
+}
+
+function terrain_generate() -> void {
+    let seed: u32 = world_seed
+    for iz in 0 to TN {
+        for ix in 0 to TN {
+            let x: f64 = -MAP_HALF + (ix as f64) * TSTEP
+            let z: f64 = -MAP_HALF + (iz as f64) * TSTEP
+            let i: i32 = iz * TN + ix
+            if world_kind == WORLD_PLANET {
+                let lon: f64 = lon_of(x)
+                let lat: f64 = lat_of(z)
+                let px: f64 = cos(lat) * cos(lon)
+                let py: f64 = sin(lat)
+                let pz: f64 = cos(lat) * sin(lon)
+                let n: f64 = fbm3(px * 2.2, py * 2.2, pz * 2.2, seed, 6)
+                let ridge: f64 = fbm3(px * 4.0 + 9.0, py * 4.0, pz * 4.0, seed + 7, 4)
+                let mut r: f64 = ridge - 0.56
+                if r < 0.0 { r = 0.0 }
+                # Relief in proportion to the planet, so a small one is not
+                # all cliffs.
+                let k: f64 = map_size / 512.0
+                th[i] = ((n - 0.5) * 70.0 + r * 90.0) * k
+                # Temperature by latitude, the poles bitter and the equator hot.
+                let c: f64 = cos(lat)
+                tt[i] = c * c * 1.05 - 0.08 + 0.12 * (fbm3(px * 3.0, py * 3.0, pz * 3.0, seed + 31, 3) - 0.5)
+            } else {
+                let n: f64 = fbm(x / 170.0, z / 170.0, seed, 5)
+                let ridge: f64 = fbm(x / 95.0 + 31.0, z / 95.0 - 17.0, seed + 7, 4)
+                let mut ax: f64 = x
+                if ax < 0.0 { ax = -ax }
+                let mut az: f64 = z
+                if az < 0.0 { az = -az }
+                let mut d: f64 = ax
+                if az > d { d = az }
+                let mut r: f64 = ridge - 0.55
+                if r < 0.0 { r = 0.0 }
+                th[i] = (n - 0.47) * 56.0 + r * 80.0
+                        + smoothstep(MAP_HALF * 0.72, MAP_HALF, d) * 48.0
+                # Cold to the north (-z), warm to the south, with drift.
+                tt[i] = 0.5 + 0.28 * (z / MAP_HALF) + 0.3 * (fbm(x / 260.0 + 70.0, z / 260.0, seed + 31, 3) - 0.5)
+            }
+        }
+    }
+
+    # Water level at a percentile of the land: lakes on a map, seas on a planet.
+    let bins: i32 = 1000
+    let hist: ptr<i32> = alloc_i32(bins)
+    for b in 0 to bins { hist[b] = 0 }
+    let mut count: i32 = 0
+    for iz in 8 to TN - 8 {
+        for ix in 8 to TN - 8 {
+            let mut b: i32 = ((th[iz * TN + ix] + 60.0) * 4.0) as i32
+            if b < 0 { b = 0 }
+            if b >= bins { b = bins - 1 }
+            hist[b] = hist[b] + 1
+            count = count + 1
+        }
+    }
+    let mut share: i32 = 13
+    if world_kind == WORLD_PLANET { share = 34 }
+    let want: i32 = count * share / 100
+    let mut acc: i32 = 0
+    let mut level: f64 = -1000.0
+    for b in 0 to bins {
+        acc = acc + hist[b]
+        if acc >= want and level == -1000.0 {
+            level = (b as f64) / 4.0 - 60.0
+        }
+    }
+    free(hist as ptr<void>)
+    for i in 0 to TN * TN {
+        th[i] = th[i] - level
+        # Higher is colder: about 0.25 of the scale per 40 m.
+        let mut up: f64 = th[i]
+        if up < 0.0 { up = 0.0 }
+        tt[i] = tt[i] - up * 0.0065
+    }
+
+    # Wetness: water spread outward by repeated blurring.
+    for i in 0 to TN * TN {
+        if th[i] < 0.8 { tw[i] = 1.0 } else { tw[i] = 0.0 }
+    }
+    for pass in 0 to 12 {
+        for iz in 1 to TN - 1 {
+            for ix in 1 to TN - 1 {
+                let i: i32 = iz * TN + ix
+                let s: f64 = tw[i] * 2.0 + tw[i - 1] + tw[i + 1] + tw[i - TN] + tw[i + TN]
+                tm[i] = s / 6.0
+            }
+        }
+        for i in 0 to TN * TN {
+            if th[i] < 0.8 { tm[i] = 1.0 }
+            tw[i] = tm[i]
+        }
+    }
+    for iz in 0 to TN {
+        for ix in 0 to TN {
+            let i: i32 = iz * TN + ix
+            let x: f64 = -MAP_HALF + (ix as f64) * TSTEP
+            let z: f64 = -MAP_HALF + (iz as f64) * TSTEP
+            let mut hd: f64 = th[i] - 12.0
+            if hd < 0.0 { hd = 0.0 }
+            let mut m: f64 = 0.0
+            if world_kind == WORLD_PLANET {
+                let lon: f64 = lon_of(x)
+                let lat: f64 = lat_of(z)
+                let px: f64 = cos(lat) * cos(lon)
+                let py: f64 = sin(lat)
+                let pz: f64 = cos(lat) * sin(lon)
+                let nm: f64 = fbm3(px * 3.0 + 50.0, py * 3.0, pz * 3.0, seed + 99, 4)
+                # Wet tropics, dry belts near 25 degrees, wet middle latitudes.
+                let mut alat: f64 = lat
+                if alat < 0.0 { alat = 0.0 - alat }
+                let a: f64 = alat / (PI * 0.5)
+                let band: f64 = 0.55 * cos(a * PI * 3.4) + 0.1
+                m = 0.25 + 0.5 * nm + band * 0.55 + 0.6 * tw[i] - 0.01 * hd
+            } else {
+                let nm: f64 = fbm(x / 110.0 + 90.0, z / 110.0 - 40.0, seed + 99, 4)
+                m = 0.05 + 0.85 * nm + 0.9 * tw[i] - 0.012 * hd
+            }
+            tm[i] = clamp01(m)
+        }
+    }
+}
+
+# Bilinear lookup in a grid. On the planet longitude wraps.
+function grid_at(g: ptr<f64>, x: f64, z: f64) -> f64 {
+    let mut gx: f64 = (x + MAP_HALF) / TSTEP
+    let mut gz: f64 = (z + MAP_HALF) / TSTEP
+    let lim: f64 = (TN - 1) as f64 - 0.001
+    if world_kind == WORLD_PLANET {
+        let w: f64 = (TN - 1) as f64
+        gx = gx - floor(gx / w) * w
+    }
+    if gx < 0.0 { gx = 0.0 }
+    if gz < 0.0 { gz = 0.0 }
+    if gx > lim { gx = lim }
+    if gz > lim { gz = lim }
+    let ix: i32 = gx as i32
+    let iz: i32 = gz as i32
+    let tx: f64 = gx - (ix as f64)
+    let tz: f64 = gz - (iz as f64)
+    let i: i32 = iz * TN + ix
+    let a: f64 = g[i] + (g[i + 1] - g[i]) * tx
+    let b: f64 = g[i + TN] + (g[i + TN + 1] - g[i + TN]) * tx
+    return a + (b - a) * tz
+}
+
+# Height above the water level.
+function ground_h(x: f64, z: f64) -> f64 {
+    return grid_at(th, x, z)
+}
+
+function moisture(x: f64, z: f64) -> f64 {
+    return grid_at(tm, x, z)
+}
+
+# Warmth through the year: coldest at midwinter (day 84), warmest at
+# midsummer (day 36). Shared by every place, added to its own temperature.
+function season_warmth() -> f64 {
+    return 0.28 * cos(2.0 * PI * (doy() - 36.0) / YEAR)
+}
+
+# The place's average temperature, without the season.
+function base_temp(x: f64, z: f64) -> f64 {
+    return grid_at(tt, x, z)
+}
+
+# The temperature now.
+function temperature(x: f64, z: f64) -> f64 {
+    return base_temp(x, z) + season_warmth()
+}
+
+function slope(x: f64, z: f64) -> f64 {
+    let dx: f64 = ground_h(x + 1.5, z) - ground_h(x - 1.5, z)
+    let dz: f64 = ground_h(x, z + 1.5) - ground_h(x, z - 1.5)
+    return sqrt(dx * dx + dz * dz) / 3.0
+}
+
+# The surface the walker and the mesh see: water is flat at level zero.
+function surface_h(x: f64, z: f64) -> f64 {
+    let h: f64 = ground_h(x, z)
+    if h < 0.0 { return 0.0 }
+    return h
+}
+
+function biome_at(x: f64, z: f64) -> i32 {
+    let h: f64 = ground_h(x, z)
+    if h < 0.0 { return B_OCEAN }
+    let m: f64 = moisture(x, z)
+    let t: f64 = base_temp(x, z)
+    if t < 0.08 { return B_ICE }
+    if h < 1.0 {
+        if m > 0.8 and t > 0.3 { return B_WETLAND }
+        return B_SHORE
+    }
+    if t < 0.24 {
+        if h > 26.0 { return B_ALPINE }
+        return B_TUNDRA
+    }
+    if t < 0.42 {
+        if m > 0.35 { return B_BOREAL }
+        return B_STEPPE
+    }
+    if t < 0.68 {
+        if m > 0.78 { return B_WETLAND }
+        if m > 0.48 { return B_TEMPERATE }
+        if m > 0.26 { return B_GRASSLAND }
+        return B_SCRUB
+    }
+    if m > 0.62 { return B_JUNGLE }
+    if m > 0.34 { return B_SAVANNA }
+    return B_DESERT
+}
+
+function biome_name(b: i32) -> string {
+    if b == B_OCEAN { return "WATER" }
+    if b == B_SHORE { return "SHORE" }
+    if b == B_WETLAND { return "WETLAND" }
+    if b == B_ICE { return "ICE" }
+    if b == B_TUNDRA { return "TUNDRA" }
+    if b == B_ALPINE { return "ALPINE" }
+    if b == B_BOREAL { return "BOREAL FOREST" }
+    if b == B_STEPPE { return "COLD STEPPE" }
+    if b == B_TEMPERATE { return "TEMPERATE FOREST" }
+    if b == B_GRASSLAND { return "GRASSLAND" }
+    if b == B_SCRUB { return "SCRUB" }
+    if b == B_DESERT { return "DESERT" }
+    if b == B_SAVANNA { return "SAVANNA" }
+    return "JUNGLE"
+}
+
+# Each biome's ground, as packed RGB.
+function biome_ground(b: i32) -> i32 {
+    if b == B_SHORE { return 0xB8A880 }
+    if b == B_WETLAND { return 0x3E5A2C }
+    if b == B_ICE { return 0xE4ECF2 }
+    if b == B_TUNDRA { return 0x7C826A }
+    if b == B_ALPINE { return 0x84807A }
+    if b == B_BOREAL { return 0x3C5432 }
+    if b == B_STEPPE { return 0x8E8A5C }
+    if b == B_TEMPERATE { return 0x4A7030 }
+    if b == B_GRASSLAND { return 0x6E8A38 }
+    if b == B_SCRUB { return 0x8C8450 }
+    if b == B_DESERT { return 0xD2B47C }
+    if b == B_SAVANNA { return 0xA49A4A }
+    return 0x2E6A2A
+}
+
+# Snow lies where it is cold enough now: deep in a cold biome's winter,
+# never in the tropics.
+function snow_cover(x: f64, z: f64) -> f64 {
+    let t: f64 = temperature(x, z)
+    return 1.0 - ramp(t, 0.06, 0.24)
+}
+
+# Ground colour from the biome, slope, rain, snow and the season, in [0, 1].
+let mut gc_r: f64 = 0.0
+let mut gc_g: f64 = 0.0
+let mut gc_b: f64 = 0.0
+
+function ground_colour(x: f64, z: f64) -> void {
+    let h: f64 = ground_h(x, z)
+    let n: f64 = 0.5 * sym_jitter((x * 0.9) as i32 * 7919 + (z * 0.9) as i32 * 104729)
+    if h < 0.0 {
+        # Water: lighter in the shallows; frozen where it is cold enough.
+        let d: f64 = ramp(0.0 - h, 0.0, 8.0)
+        let ice: f64 = (1.0 - ramp(temperature(x, z), 0.02, 0.14)) * 0.9
+        gc_r = (0.40 - 0.24 * d) * (1.0 - ice) + 0.84 * ice
+        gc_g = (0.56 - 0.26 * d) * (1.0 - ice) + 0.90 * ice
+        gc_b = (0.66 - 0.16 * d) * (1.0 - ice) + 0.94 * ice
+        return
+    }
+    let b: i32 = biome_at(x, z)
+    let c: i32 = biome_ground(b)
+    let mut r: f64 = (col_r(c) as f64) / 255.0
+    let mut g: f64 = (col_g(c) as f64) / 255.0
+    let mut bl: f64 = (col_b(c) as f64) / 255.0
+    # Rock on steep ground.
+    let rk: f64 = ramp(slope(x, z), 0.45, 0.9)
+    r = r + (0.50 - r) * rk
+    g = g + (0.48 - g) * rk
+    bl = bl + (0.44 - bl) * rk
+    # Green biomes dry out in late summer and brown in autumn.
+    let green: bool = b == B_TEMPERATE or b == B_GRASSLAND or b == B_BOREAL or b == B_SAVANNA or b == B_WETLAND
+    if green {
+        let d: f64 = doy()
+        let dry: f64 = (ramp(d, 30.0, 48.0) * (1.0 - ramp(d, 48.0, 60.0)) * 0.5 + autumn_amount() * 0.7)
+                       * (1.0 - rk)
+        r = r + 0.10 * dry
+        g = g - 0.05 * dry
+    }
+    # Rain darkens the ground while it falls and a while after.
+    let k: f64 = (1.0 + 0.08 * n) * (1.0 - 0.22 * clamp01(rain * 0.7 + wetness * 0.3))
+    r = r * k
+    g = g * k
+    bl = bl * k
+    let snow: f64 = snow_cover(x, z)
+    gc_r = r + (0.93 - r) * snow
+    gc_g = g + (0.95 - g) * snow
+    gc_b = bl + (0.98 - bl) * snow
+}
+
+# A dry, gentle spot near the middle to start the walker on.
+let mut start_x: f64 = 0.0
+let mut start_z: f64 = 0.0
+
+function find_start() -> void {
+    let mut r: f64 = 0.0
+    while r < MAP_HALF * 0.8 {
+        for k in 0 to 24 {
+            let a: f64 = 2.0 * PI * (k as f64) / 24.0
+            let x: f64 = cos(a) * r
+            let z: f64 = sin(a) * r
+            let h: f64 = ground_h(x, z)
+            if h > 1.5 and h < 10.0 and slope(x, z) < 0.18 {
+                start_x = x
+                start_z = z
+                return
+            }
+        }
+        r = r + 4.0
+    }
+}
