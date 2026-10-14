@@ -530,7 +530,9 @@ function make_species(sp: i32, k: i32) -> void {
     if form == FORM_CONIFER { tc = frand(0.12, 0.42) }
     if form == FORM_TREE { tc = frand(0.3, 0.88) }
     let tw: f64 = frand(0.14, 0.26)
-    set_temp(sp, tc - tw, tc + tw)
+    let mut t0: f64 = tc - tw
+    if t0 < 0.12 { t0 = 0.12 }
+    set_temp(sp, t0, tc + tw)
 }
 
 # Replace any generated species with a fresh set for this world.

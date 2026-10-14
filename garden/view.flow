@@ -807,20 +807,20 @@ function set_tint(k: i32) -> void {
     let kind: i32 = lf_kind[sp]
     # The season as this plant feels it, where it stands: a tropical
     # deciduous tree keeps its leaves, a northern one is bare for months.
-    let t_now: f64 = (in_tb[k] as f64) + season_warmth()
-    let cooling: bool = d >= 36.0 and d < 84.0
+    let t_now: f64 = local_temp(in_tb[k] as f64, in_z[k] as f64)
+    let cooling: bool = cooling_at(in_z[k] as f64)
     if lf_decid[sp] == 1 {
         let ac: i32 = lf_autumn[sp]
         let mut a: f64 = 0.0
-        if cooling { a = 1.0 - ramp(t_now, 0.36, 0.48) }
+        if cooling { a = 1.0 - ramp(t_now, T_FREEZE + 0.05, T_FREEZE + 0.17) }
         t_leaf = a as f32
         t_leaf_r = (col_r(ac) as f32) / 255.0
         t_leaf_g = (col_g(ac) as f32) / 255.0
         t_leaf_b = (col_b(ac) as f32) / 255.0
-        t_dens = ramp(t_now, 0.28, 0.40) as f32
-        if !cooling and t_now < 0.48 {
+        t_dens = ramp(t_now, T_FREEZE - 0.01, T_FREEZE + 0.08) as f32
+        if !cooling and t_now < T_FREEZE + 0.17 {
             # Spring leaves come out pale.
-            t_leaf = (0.5 * (1.0 - ramp(t_now, 0.36, 0.48))) as f32
+            t_leaf = (0.5 * (1.0 - ramp(t_now, T_FREEZE + 0.05, T_FREEZE + 0.17))) as f32
             t_leaf_r = 0.62
             t_leaf_g = 0.82
             t_leaf_b = 0.40

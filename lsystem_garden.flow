@@ -181,10 +181,34 @@ function report(years: i32) -> i32 {
     for sp in 0 to N_SPECIES { last[sp] = 0 }
     for y in 0 to years {
         let mut d: i32 = 0
+        let mut season_births: i32 = births
         while d < 96 {
             sim_day = sim_day + 1.0
             life_step(1.0)
             d = d + 1
+            if d % 24 == 12 {
+                # Midseason: how many plants are growing at all, and how warm
+                # the middle of the map is.
+                let mut on: i32 = 0
+                let mut alive: i32 = 0
+                for k in 0 to n_plants {
+                    if in_used[k] == 1 and in_stage[k] != ST_SEED and in_stage[k] <= ST_ADULT {
+                        alive = alive + 1
+                        if warmth_ok(in_sp[k], local_temp(in_tb[k] as f64, in_z[k] as f64)) > 0.05 { on = on + 1 }
+                    }
+                }
+                print("  ")
+                print(season_name())
+                print("  centre C ")
+                print((temperature(0.0, 0.0) * 60.0 - 25.0) as i32)
+                print("  growing % ")
+                print(on * 100 / (alive + 1))
+                print("  sprouted in first half ")
+                print(births - season_births)
+                println("")
+                season_births = births
+            }
+            if d % 24 == 0 { season_births = births }
         }
         print("year ")
         print(y + 1)

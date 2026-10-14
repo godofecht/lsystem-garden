@@ -33,8 +33,10 @@
 #   season (terrain.flow): below its range a plant is dormant, above it heat
 #   slows it. Seeds wait at least two weeks, then sprout when it is warm and
 #   wet enough, so the tropics sprout all year and the north only in spring.
-#   Frost kills young seedlings of warm-climate species, and annuals die at
-#   the first hard frost. Perennial herbs die back to the ground in the cold.
+#   Nothing grows, sprouts or sets seed below freezing; activity rises from
+#   0 to 5 degrees, a little lower for cold-adapted species. Frost below -2
+#   kills the young of warm-climate species, and annuals die at the first
+#   frost. Perennial herbs die back to the ground in the cold.
 #
 # WEATHER
 #   Wetness, the ground's memory of rain (garden/sky.flow), shifts every
@@ -321,8 +323,14 @@ function suit(sp: i32, x: f64, z: f64) -> f64 {
 
 # How active a plant of species sp is at temperature t: 0 dormant in cold,
 # 1 in its range, falling off again in heat beyond it.
+# Nothing grows below freezing: activity rises from 0 at 0 degrees to full
+# at about 5. Cold-adapted species (pines, tundra plants) start a couple of
+# degrees lower. Inside that, the species' own range and heat beyond it.
 function warmth_ok(sp: i32, t: f64) -> f64 {
-    return ramp(t, lf_t0[sp] - 0.2, lf_t0[sp] + 0.02) * (1.0 - 0.6 * ramp(t, lf_t1[sp] + 0.05, lf_t1[sp] + 0.3))
+    let mut floor_t: f64 = T_FREEZE
+    if lf_t0[sp] < 0.3 { floor_t = T_FREEZE - 0.05 }
+    let cold: f64 = ramp(t, floor_t, floor_t + 0.08)
+    return cold * ramp(t, lf_t0[sp] - 0.2, lf_t0[sp] + 0.02) * (1.0 - 0.6 * ramp(t, lf_t1[sp] + 0.05, lf_t1[sp] + 0.3))
 }
 
 function wrap_x(x: f64) -> f64 {
@@ -587,7 +595,6 @@ function life_step(dt: f64) -> void {
     let d: f64 = doy()
     let new_year: bool = d < last_doy
     last_doy = d
-    let sw: f64 = season_warmth()
     life_tick = life_tick + 1
 
     for k in 0 to n_plants {
@@ -596,7 +603,7 @@ function life_step(dt: f64) -> void {
             let st: i32 = in_stage[k]
             in_age[k] = in_age[k] + (dt as f32)
             in_st[k] = in_st[k] + (dt as f32)
-            let t_now: f64 = (in_tb[k] as f64) + sw
+            let t_now: f64 = local_temp(in_tb[k] as f64, in_z[k] as f64)
             let tg: f64 = warmth_ok(sp, t_now)
             let fit: f64 = in_fit[k] as f64
 
@@ -661,10 +668,10 @@ function life_step(dt: f64) -> void {
                     let mut dies: bool = in_age[k] > in_life[k]
                     if light < 0.4 and rng_unit() < 0.02 * dt * (1.0 - light / 0.4) { dies = true }
                     # Annuals die at the first hard frost, or of age.
-                    if lf_kind[sp] == K_ANNUAL and t_now < lf_t0[sp] - 0.12 and in_age[k] > 12.0 { dies = true }
+                    if lf_kind[sp] == K_ANNUAL and t_now < T_FREEZE - 0.02 and in_age[k] > 12.0 { dies = true }
                     if lf_kind[sp] == K_ANNUAL and in_age[k] > 140.0 { dies = true }
                     # Frost kills the young of warm-climate species.
-                    if t_now < 0.08 and lf_t0[sp] > 0.2 and (in_gage[k] as f64) < lf_grow[sp] * 0.3
+                    if t_now < T_FREEZE - 0.035 and lf_t0[sp] > 0.3 and (in_gage[k] as f64) < lf_grow[sp] * 0.3
                        and rng_unit() < 0.06 * dt { dies = true }
                     if dies {
                         in_stage[k] = ST_WITHER
@@ -816,7 +823,7 @@ function populate() -> void {
                     in_next[k] = hash_head[cc]
                     hash_head[cc] = k
                     if !is_tree(sp) { hash_count[cc] = hash_count[cc] + 1 }
-                    update_shape(k, warmth_ok(sp, (in_tb[k] as f64) + season_warmth()))
+                    update_shape(k, warmth_ok(sp, local_temp(in_tb[k] as f64, in_z[k] as f64)))
                 }
             }
         }

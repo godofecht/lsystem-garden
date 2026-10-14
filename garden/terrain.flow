@@ -250,10 +250,38 @@ function moisture(x: f64, z: f64) -> f64 {
     return grid_at(tm, x, z)
 }
 
-# Warmth through the year: coldest at midwinter (day 84), warmest at
-# midsummer (day 36). Shared by every place, added to its own temperature.
-function season_warmth() -> f64 {
-    return 0.28 * cos(2.0 * PI * (doy() - 36.0) / YEAR)
+# The temperature scale runs 0 to 1; in degrees it is t * 60 - 25, so water
+# freezes at T_FREEZE.
+const T_FREEZE: f64 = 0.4167
+
+# The season: +1 at the northern midsummer (day 36), -1 at midwinter (day 84).
+function season_phase() -> f64 {
+    return cos(2.0 * PI * (doy() - 36.0) / YEAR)
+}
+
+# The planet's southern half has its seasons the other way round.
+function hemi(z: f64) -> f64 {
+    if world_kind == WORLD_PLANET and z < 0.0 { return -1.0 }
+    return 1.0
+}
+
+# How far the year swings a place's temperature: about 17 degrees either way
+# in the north, a few degrees in the tropics.
+function season_amp(tb: f64) -> f64 {
+    return 0.28 * (1.0 - 0.75 * ramp(tb, 0.55, 0.9))
+}
+
+# The temperature now at a place of average temperature tb, at map z.
+function local_temp(tb: f64, z: f64) -> f64 {
+    return tb + season_amp(tb) * season_phase() * hemi(z)
+}
+
+# Whether the year is turning cold at map z: autumn rather than spring.
+function cooling_at(z: f64) -> bool {
+    let d: f64 = doy()
+    let north: bool = d >= 36.0 and d < 84.0
+    if hemi(z) < 0.0 { return !north }
+    return north
 }
 
 # The place's average temperature, without the season.
@@ -263,7 +291,7 @@ function base_temp(x: f64, z: f64) -> f64 {
 
 # The temperature now.
 function temperature(x: f64, z: f64) -> f64 {
-    return base_temp(x, z) + season_warmth()
+    return local_temp(base_temp(x, z), z)
 }
 
 function slope(x: f64, z: f64) -> f64 {
@@ -346,7 +374,7 @@ function biome_ground(b: i32) -> i32 {
 # never in the tropics.
 function snow_cover(x: f64, z: f64) -> f64 {
     let t: f64 = temperature(x, z)
-    return 1.0 - ramp(t, 0.06, 0.24)
+    return 1.0 - ramp(t, T_FREEZE - 0.06, T_FREEZE + 0.02)
 }
 
 # Ground colour from the biome, slope, rain, snow and the season, in [0, 1].
@@ -360,7 +388,7 @@ function ground_colour(x: f64, z: f64) -> void {
     if h < 0.0 {
         # Water: lighter in the shallows; frozen where it is cold enough.
         let d: f64 = ramp(0.0 - h, 0.0, 8.0)
-        let ice: f64 = (1.0 - ramp(temperature(x, z), 0.02, 0.14)) * 0.9
+        let ice: f64 = (1.0 - ramp(temperature(x, z), T_FREEZE - 0.09, T_FREEZE - 0.02)) * 0.9
         gc_r = (0.40 - 0.24 * d) * (1.0 - ice) + 0.84 * ice
         gc_g = (0.56 - 0.26 * d) * (1.0 - ice) + 0.90 * ice
         gc_b = (0.66 - 0.16 * d) * (1.0 - ice) + 0.94 * ice
