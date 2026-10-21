@@ -63,6 +63,8 @@ let mut sp_leafw: ptr<f64> = null
 # Whether a species is a tree: trees ignore the herb cell limit, mind only
 # woody neighbours when they sprout, and block the walker.
 let mut sp_tree: ptr<i32> = null
+# Marks authored and generated fern-like morphologies for atlas foliage.
+let mut sp_frond: ptr<i32> = null
 
 function is_tree(sp: i32) -> bool {
     return sp_tree[sp] == 1
@@ -326,7 +328,12 @@ function define_species() -> void {
     sp_trop = alloc_f64(MAX_SPECIES)
     sp_leafw = alloc_f64(MAX_SPECIES)
     sp_tree = alloc_i32(MAX_SPECIES)
-    for sp in 0 to MAX_SPECIES { sp_tree[sp] = 0 }
+    sp_frond = alloc_i32(MAX_SPECIES)
+    for sp in 0 to MAX_SPECIES {
+        sp_tree[sp] = 0
+        sp_frond[sp] = 0
+    }
+    sp_frond[1] = 1
     sp_tree[SP_OAK] = 1
     sp_tree[SP_PINE] = 1
     sp_tree[SP_BIRCH] = 1

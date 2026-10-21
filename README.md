@@ -64,6 +64,31 @@ On the web page the sliders set the world, light, rain, wind, hour, day length
 and speed. Choose the world before pressing Enter and it is grown at that size.
 `?seed=4242`, `?size=1024` and `?world=planet` work in the address.
 
+## Atlas foliage (Quixel / Fab)
+
+The web garden can render alpha-cutout textured leaves using the existing Flow
+software depth buffer. The L-system still generates branches, node positions,
+leaf orientations, growth stages and wind deformation; the atlas only supplies
+the photographic appearance of each leaf/frond. Ferns are identified among the
+nineteen authored and the generated species. The rendered cutouts use
+perspective-correct UVs, depth testing, sunlight, fog and seasonal tint. Tiny
+and distant leaves retain the existing cheap procedural strokes.
+
+Open **Foliage atlas** beneath the canvas. Download a licensed atlas such as
+[Holly Fern](https://www.fab.com/listings/9a642c7e-ceac-48f5-bb03-5c61ebd8b0ad)
+from Fab, choose its albedo/basecolour image, and optionally choose its matching
+opacity map. Drag a rectangle around one frond in the preview, keeping its
+base at the bottom, then press **Apply selected cutout**. Choose **Ferns** or
+**All leafy plants**, or turn atlas rendering off without changing the world.
+The import stays in browser memory; reload to discard it. This also works
+with user-owned non-Quixel RGBA atlases.
+
+No Megascans texture is committed to this repository. Obtain each file under
+its own terms. The [Fab Standard License](https://www.fab.com/eula) permits
+incorporating assets into commercial projects and non-Unreal applications but
+prohibits redistributing source assets on a standalone basis. Legacy Quixel
+or Unreal-only acquisitions may have different restrictions.
+
 ## Building
 
 You need a checkout of [Flow](https://github.com/flooooooooooow/flow) and,
