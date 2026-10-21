@@ -289,6 +289,8 @@ function make_species(sp: i32, k: i32) -> void {
     rule_slot = 0
     for i in 0 to 3 { g_sym[sp * 3 + i] = 0 }
     sp_tree[sp] = 0
+    sp_frond[sp] = 0
+    if form == FORM_FROND { sp_frond[sp] = 1 }
 
     gt_begin()
     gt_add(name_root(form, rng_below(6)))
