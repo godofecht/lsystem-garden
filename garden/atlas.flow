@@ -1,0 +1,126 @@
+# Atlas cutout foliage for the software depth buffer.
+# Input is a user-acquired RGBA texture, cropped and resized in the web UI.
+# The asset is intentionally not stored in the open-source repository.
+
+import "./common.flow"
+import "stdlib/render3d.flow"
+
+const ATLAS_SIDE: i32 = 128
+let mut atlas_rgba: ptr<u8> = null
+let mut atlas_w: i32 = 0
+let mut atlas_h: i32 = 0
+# 0: procedural; 1: frond species; 2: all leafy species.
+let mut atlas_mode: i32 = 1
+let mut atlas_light: f32 = 1.0
+let mut atlas_tint: f32 = 0.0
+let mut atlas_tr: f32 = 0.0
+let mut atlas_tg: f32 = 0.0
+let mut atlas_tb: f32 = 0.0
+let mut atlas_fog: f32 = 0.0
+let mut atlas_fr: f32 = 0.0
+let mut atlas_fg: f32 = 0.0
+let mut atlas_fb: f32 = 0.0
+
+function atlas_init() -> void {
+    if atlas_rgba == null { atlas_rgba = alloc_u8(ATLAS_SIDE * ATLAS_SIDE * 4) }
+}
+
+@flow_api
+export function garden_atlas_upload(data: ptr<u8>, width: i32, height: i32) -> i32 {
+    if atlas_rgba == null or data == null { return 0 }
+    if width < 1 or height < 1 or width > ATLAS_SIDE or height > ATLAS_SIDE { return 0 }
+    let n: i32 = width * height * 4
+    for i in 0 to n { atlas_rgba[i] = data[i] }
+    atlas_w = width
+    atlas_h = height
+    return 1
+}
+
+@flow_api
+export function garden_atlas_mode(mode: i32) -> i32 {
+    if mode >= 0 and mode <= 2 { atlas_mode = mode }
+    return atlas_mode
+}
+
+# Depth-tested, alpha-cutout, perspective-correct atlas triangle.
+# Deliberately uses the same r3d_color/r3d_depth buffers as branch geometry.
+# Each vertex has screen coordinates, clip depth, and reciprocal clip W.
+function atlas_tri(a: SVert, b: SVert, c: SVert,
+                   au: f32, av: f32, bu: f32, bv: f32, cu: f32, cv: f32) -> void {
+    if atlas_w == 0 or atlas_h == 0 { return }
+    let den: f32 = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y)
+    if den > -0.00001 and den < 0.00001 { return }
+
+    let mut minx: i32 = a.x as i32
+    let mut maxx: i32 = minx
+    let mut miny: i32 = a.y as i32
+    let mut maxy: i32 = miny
+    let bx: i32 = b.x as i32
+    let cx: i32 = c.x as i32
+    let by: i32 = b.y as i32
+    let cy: i32 = c.y as i32
+    if bx < minx { minx = bx }
+    if cx < minx { minx = cx }
+    if bx > maxx { maxx = bx }
+    if cx > maxx { maxx = cx }
+    if by < miny { miny = by }
+    if cy < miny { miny = cy }
+    if by > maxy { maxy = by }
+    if cy > maxy { maxy = cy }
+    if minx < 0 { minx = 0 }
+    if miny < 0 { miny = 0 }
+    if maxx >= r3d_w { maxx = r3d_w - 1 }
+    if maxy >= r3d_h { maxy = r3d_h - 1 }
+    if minx > maxx or miny > maxy { return }
+
+    let ua: f32 = au * a.iw
+    let ub: f32 = bu * b.iw
+    let uc: f32 = cu * c.iw
+    let va: f32 = av * a.iw
+    let vb: f32 = bv * b.iw
+    let vc: f32 = cv * c.iw
+    let mut y: i32 = miny
+    while y <= maxy {
+        let py: f32 = (y as f32) + 0.5
+        let mut x: i32 = minx
+        while x <= maxx {
+            let px: f32 = (x as f32) + 0.5
+            let wa: f32 = ((b.y - c.y) * (px - c.x) + (c.x - b.x) * (py - c.y)) / den
+            let wb: f32 = ((c.y - a.y) * (px - c.x) + (a.x - c.x) * (py - c.y)) / den
+            let wc: f32 = 1.0 - wa - wb
+            if wa >= 0.0 and wb >= 0.0 and wc >= 0.0 {
+                let depth: f32 = wa * a.z + wb * b.z + wc * c.z
+                let di: i32 = y * r3d_w + x
+                if depth < r3d_depth[di] {
+                    let iw: f32 = wa * a.iw + wb * b.iw + wc * c.iw
+                    if iw > 0.000001 {
+                        let mut u: f32 = (wa * ua + wb * ub + wc * uc) / iw
+                        let mut v: f32 = (wa * va + wb * vb + wc * vc) / iw
+                        if u < 0.0 { u = 0.0 }
+                        if v < 0.0 { v = 0.0 }
+                        if u > 1.0 { u = 1.0 }
+                        if v > 1.0 { v = 1.0 }
+                        let tx: i32 = (u * ((atlas_w - 1) as f32)) as i32
+                        let ty: i32 = (v * ((atlas_h - 1) as f32)) as i32
+                        let ti: i32 = (ty * atlas_w + tx) * 4
+                        if atlas_rgba[ti + 3] >= (128 as u8) {
+                            let rr: f32 = (atlas_rgba[ti] as f32) * atlas_light
+                            let gg: f32 = (atlas_rgba[ti + 1] as f32) * atlas_light
+                            let bb: f32 = (atlas_rgba[ti + 2] as f32) * atlas_light
+                            let tr: f32 = rr + (atlas_tr * 255.0 - rr) * atlas_tint
+                            let tg: f32 = gg + (atlas_tg * 255.0 - gg) * atlas_tint
+                            let tb: f32 = bb + (atlas_tb * 255.0 - bb) * atlas_tint
+                            let oi: i32 = di * 3
+                            r3d_depth[di] = depth
+                            r3d_color[oi] = r3d_clampf(tr * (1.0 - atlas_fog) + atlas_fr * atlas_fog * 255.0, 0.0, 255.0) as u8
+                            r3d_color[oi + 1] = r3d_clampf(tg * (1.0 - atlas_fog) + atlas_fg * atlas_fog * 255.0, 0.0, 255.0) as u8
+                            r3d_color[oi + 2] = r3d_clampf(tb * (1.0 - atlas_fog) + atlas_fb * atlas_fog * 255.0, 0.0, 255.0) as u8
+                        }
+                    }
+                }
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
