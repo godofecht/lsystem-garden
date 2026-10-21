@@ -38,6 +38,7 @@ import "./species.flow"
 import "./calendar.flow"
 import "./terrain.flow"
 import "./models.flow"
+import "./atlas.flow"
 import "./life.flow"
 import "./sky.flow"
 
@@ -133,6 +134,7 @@ let mut t_flower: f32 = 1.0
 # Brightness for the current plant: 1 on the map (the frame's tint lights
 # it), the sunlight where it stands on the planet.
 let mut t_bright: f32 = 1.0
+let mut atlas_active: bool = false
 # The planet view replaces the model's yaw with a full frame along the
 # surface normal, and has no fog.
 let mut use_basis: bool = false
@@ -163,6 +165,7 @@ let mut st_flowers: i32 = 0
 
 function view_init() -> bool {
     if !r3d_init(RW, RH) { return false }
+    atlas_init()
     big = alloc_u8(WIN_W * WIN_H * 3)
     vp = alloc_f32(16)
     proj = alloc_f32(16)
@@ -516,6 +519,10 @@ function draw_leaf(o: i32, node: i32, s: f32, lmx: f32, lmy: f32, lmz: f32, leaf
         return
     }
     let half: f32 = len * leafw * 0.5
+    if atlas_active and px_len >= 8.0 {
+        atlas_leaf(node, dx, dy, dz, sx, sy, sz, len, half, k * t_bright)
+        return
+    }
     let bx: f32 = nc_x[node]
     let by: f32 = nc_y[node]
     let bz: f32 = nc_z[node]
@@ -544,6 +551,59 @@ function draw_leaf(o: i32, node: i32, s: f32, lmx: f32, lmy: f32, lmz: f32, leaf
     let vt: SVert = clip_to_sv(tx, ty, tz, tw, ctip)
     r3d_raster_tri(vb, vl, vt)
     r3d_raster_tri(vb, vt, vr)
+}
+
+# Textured leaves remain attached to their turtle nodes. Each terminal
+# ornament supplies an orientation and size; the atlas provides the cutout.
+function atlas_leaf(node: i32, dx: f32, dy: f32, dz: f32,
+                    sx: f32, sy: f32, sz: f32, len: f32, half: f32,
+                    light: f32) -> void {
+    let bx: f32 = nc_x[node]
+    let by: f32 = nc_y[node]
+    let bz: f32 = nc_z[node]
+    let bw: f32 = nc_w[node]
+
+    off_clip(sx * half, sy * half, sz * half)
+    let brx: f32 = bx + oc_x
+    let bry: f32 = by + oc_y
+    let brz: f32 = bz + oc_z
+    let brw: f32 = bw + oc_w
+
+    off_clip(0.0 - sx * half, 0.0 - sy * half, 0.0 - sz * half)
+    let blx: f32 = bx + oc_x
+    let bly: f32 = by + oc_y
+    let blz: f32 = bz + oc_z
+    let blw: f32 = bw + oc_w
+
+    off_clip(dx * len + sx * half, dy * len + sy * half, dz * len + sz * half)
+    let trx: f32 = bx + oc_x
+    let try0: f32 = by + oc_y
+    let trz: f32 = bz + oc_z
+    let trw: f32 = bw + oc_w
+
+    off_clip(dx * len - sx * half, dy * len - sy * half, dz * len - sz * half)
+    let tlx: f32 = bx + oc_x
+    let tly: f32 = by + oc_y
+    let tlz: f32 = bz + oc_z
+    let tlw: f32 = bw + oc_w
+    if brw < NEAR or blw < NEAR or trw < NEAR or tlw < NEAR { return }
+
+    atlas_light = light
+    atlas_tint = t_leaf
+    atlas_tr = t_leaf_r
+    atlas_tg = t_leaf_g
+    atlas_tb = t_leaf_b
+    atlas_fog = leaf_fog
+    atlas_fr = fog_r
+    atlas_fg = fog_g
+    atlas_fb = fog_b
+    let white: V3 = v3(1.0, 1.0, 1.0)
+    let bl: SVert = clip_to_sv(blx, bly, blz, blw, white)
+    let br: SVert = clip_to_sv(brx, bry, brz, brw, white)
+    let tr: SVert = clip_to_sv(trx, try0, trz, trw, white)
+    let tl: SVert = clip_to_sv(tlx, tly, tlz, tlw, white)
+    atlas_tri(bl, br, tr, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0)
+    atlas_tri(bl, tr, tl, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0)
 }
 
 # A disc at node + offset (model space), radius in model metres.
@@ -674,6 +734,7 @@ function draw_flower(o: i32, node: i32, s0: f32, fcol: i32) -> void {
 function draw_model(m: i32, px: f32, py: f32, pz: f32, cyaw: f32, syaw: f32, s: f32,
                     frac: f32, fcol: i32, ph: f32) -> void {
     let sp: i32 = m_sp[m]
+    atlas_active = atlas_w > 0 and (atlas_mode == 2 or (atlas_mode == 1 and sp_frond[sp] == 1))
     let h: f32 = m_h[m] * s
     build_mvp(px, py, pz, cyaw, syaw, s)
     let mut lf: f32 = (mvp[15] - fog_near) / (fog_far - fog_near)
