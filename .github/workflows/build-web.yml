@@ -1,0 +1,39 @@
+name: Build garden WebAssembly
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: flooooooooooow/flow
+          path: flow
+      - name: Install Emscripten
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y emscripten clang
+      - name: Compile garden from Flow to WASM
+        run: FLOW_HOME="$GITHUB_WORKSPACE/flow" ./build_web.sh
+      - name: Verify atlas exports and published files
+        shell: bash
+        run: |
+          test -s docs/index.html
+          test -s docs/lsystem_garden.js
+          test -s docs/lsystem_garden.wasm
+          grep -q _garden_atlas_upload docs/index.html
+          grep -q _garden_atlas_mode docs/index.html
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lsystem-garden-wasm
+          path: docs/
+          if-no-files-found: error
