@@ -18,10 +18,11 @@ jobs:
         with:
           repository: flooooooooooow/flow
           path: flow
-      - name: Install Emscripten
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y emscripten clang
+      - name: Install supported Emscripten SDK
+        uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: '5.0.1'
+          actions-cache-folder: emsdk-cache
       - name: Compile garden from Flow to WASM
         run: FLOW_HOME="$GITHUB_WORKSPACE/flow" ./build_web.sh
       - name: Verify atlas exports and published files
