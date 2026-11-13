@@ -126,8 +126,6 @@ You can walk a map 256, 512 or 1024 m across, or orbit a small planet with exagg
 
 ## Ideas to try
 
-The licence below does not yet give permission to change or share this code. These ideas are for study on your own machine.
-
 1. In `garden/species.flow`, find `species_rules` and change one rule, such as `F->F[+F]F[-F][F]`. Rebuild and see how the plant's shape changes.
 2. In `garden/life.flow`, the lines that make a seed's genes use `exp(0.07 * rng_gauss())` and `exp(0.08 * rng_gauss())`. Make the numbers bigger for faster mutation, then use `LSYS_REPORT=8` to compare how the species do.
 3. In `garden/calendar.flow`, add a new time speed to `time_scale` and `time_scale_name`.
@@ -165,23 +163,25 @@ The web garden can render alpha-cutout textured leaves using the existing Flow s
 
 Open **Foliage atlas** beneath the canvas. Download a licensed atlas such as [Holly Fern on Fab](https://www.fab.com/listings/9a642c7e-ceac-48f5-bb03-5c61ebd8b0ad), choose its albedo or basecolour image, and optionally choose its matching opacity map. Drag a rectangle around one frond in the preview, keeping its base at the bottom, then press **Apply selected cutout**. Choose **Ferns** or **All leafy plants**, or turn atlas rendering off without changing the world. The import stays in browser memory; reload to discard it. This also works with user-owned non-Quixel RGBA atlases.
 
-This panel is in `web_src/index.html`. The copy in `docs/`, which the live demo serves, has not been rebuilt since it was added, so the live demo does not show it yet.
+This panel is in `web_src/index.html`, and the live demo includes it.
 
 No Megascans texture is committed to this repository. Obtain each file under its own terms. The [Fab Standard License](https://www.fab.com/eula) permits incorporating assets into commercial projects and non-Unreal applications but prohibits redistributing source assets on a standalone basis. Legacy Quixel or Unreal-only acquisitions may have different restrictions.
 
 ### Web build
 
-`build_web.sh` runs `flow wasm` on `lsystem_garden.flow`, exports `_garden_set`, `_garden_get`, `_garden_atlas_upload` and `_garden_atlas_mode` for the page to call, then copies `web_src/index.html` over the generated page. GitHub Pages serves the `docs/` folder on `main`.
+`build_web.sh` runs `flow wasm` on `lsystem_garden.flow`, exports `_garden_set`, `_garden_get`, `_garden_atlas_upload` and `_garden_atlas_mode` for the page to call, then copies `web_src/index.html` over the generated page. On every push to `main`, the GitHub Actions workflow runs the same build and publishes the result to GitHub Pages.
 
 ![A world seen from above, with forests, grassland and lakes spread across the map](world.gif)
 
 ## Project status
 
-The GitHub Actions workflow `.github/workflows/build-web.yml` builds the WebAssembly version on every push and pull request, and it passed on the latest run. It does not publish the result. The committed `docs/` folder is published by hand.
+The GitHub Actions workflow `.github/workflows/build-web.yml` builds the WebAssembly version on every push and pull request. On a push to `main` it also deploys the build to GitHub Pages, so the live demo follows `main`. The `docs/` folder in the repository is an older build. Run `build_web.sh` to refresh it before serving it locally.
 
 ## Licence
 
-You may read the source and look at the built site. You may not use, copy, change or share them. See [LICENSE](LICENSE) (all rights reserved, copyright 2026 Abhishek Shivakumar).
+You can use, copy and change this code for any purpose, as long as you keep the copyright notice. See [LICENSE](LICENSE) (MIT).
+
+Building from source needs the Flow toolchain, which has its own licence.
 
 ## Credits
 
